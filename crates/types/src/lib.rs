@@ -1,25 +1,25 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ServiceName {
-    ApiGateway,
-    ControlPlane,
-    Coordinator,
-    ProcessorRuntime,
-    QueryService,
-    SinkWriter,
-    StateManager,
-}
+#![allow(clippy::module_name_repetitions)]
 
-impl ServiceName {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::ApiGateway => "api-gateway",
-            Self::ControlPlane => "control-plane",
-            Self::Coordinator => "coordinator",
-            Self::ProcessorRuntime => "processor-runtime",
-            Self::QueryService => "query-service",
-            Self::SinkWriter => "sink-writer",
-            Self::StateManager => "state-manager",
-        }
-    }
-}
+mod contracts;
+mod pipeline;
+mod service;
+
+pub use contracts::{
+    CheckpointSummary, CreatePipelineRequest, CreatePipelineResponse, DeadLetterRecord,
+    DeployPipelineRequest, DeployPipelineResponse, GetCheckpointHistoryRequest,
+    GetCheckpointHistoryResponse, GetPipelineRequest, GetPipelineResponse, GetReplayJobRequest,
+    GetReplayJobResponse, GetRunStatusRequest, GetRunStatusResponse, GetTopicRequest,
+    GetTopicResponse, ListAssignmentsRequest, ListAssignmentsResponse, ListDeadLettersRequest,
+    ListDeadLettersResponse, ListPipelinesRequest, ListPipelinesResponse, ListTopicsRequest,
+    ListTopicsResponse, PartitionAssignment, PausePipelineRequest, PausePipelineResponse,
+    PipelineRunStatus, PipelineSummary, RegisterTopicRequest, RegisterTopicResponse,
+    RegisteredTopic, ReplayJob, ReplayJobStatus, RequestReplayRequest, RequestReplayResponse,
+    ResumePipelineRequest, ResumePipelineResponse, RunStatus, TopicSummary,
+    UpdatePipelineVersionRequest, UpdatePipelineVersionResponse,
+};
+pub use pipeline::{
+    AggregateFunction, DeploymentConfig, DeploymentState, EventEncoding, JoinKind, OperatorKind,
+    OperatorNode, PipelineSpec, PipelineValidationError, PipelineValidationIssue, ReplayPolicy,
+    SinkKind, SinkSpec, SourceTopic, WindowKind, WindowSpec,
+};
+pub use service::ServiceName;

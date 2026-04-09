@@ -1,0 +1,400 @@
+syntax = "proto3";
+
+package eventpipeline.v1;
+
+service PipelineService {
+  rpc CreatePipeline(CreatePipelineRequest) returns (CreatePipelineResponse);
+  rpc UpdatePipelineVersion(UpdatePipelineVersionRequest) returns (UpdatePipelineVersionResponse);
+  rpc GetPipeline(GetPipelineRequest) returns (GetPipelineResponse);
+  rpc ListPipelines(ListPipelinesRequest) returns (ListPipelinesResponse);
+  rpc DeployPipeline(DeployPipelineRequest) returns (DeployPipelineResponse);
+  rpc PausePipeline(PausePipelineRequest) returns (PausePipelineResponse);
+  rpc ResumePipeline(ResumePipelineRequest) returns (ResumePipelineResponse);
+  rpc RequestReplay(RequestReplayRequest) returns (RequestReplayResponse);
+  rpc GetReplayJob(GetReplayJobRequest) returns (GetReplayJobResponse);
+}
+
+service TopicService {
+  rpc RegisterTopic(RegisterTopicRequest) returns (RegisterTopicResponse);
+  rpc GetTopic(GetTopicRequest) returns (GetTopicResponse);
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse);
+}
+
+service RunService {
+  rpc GetRunStatus(GetRunStatusRequest) returns (GetRunStatusResponse);
+  rpc ListAssignments(ListAssignmentsRequest) returns (ListAssignmentsResponse);
+  rpc GetCheckpointHistory(GetCheckpointHistoryRequest) returns (GetCheckpointHistoryResponse);
+  rpc ListDeadLetters(ListDeadLettersRequest) returns (ListDeadLettersResponse);
+}
+
+message CreatePipelineRequest {
+  PipelineSpec pipeline = 1;
+}
+
+message CreatePipelineResponse {
+  PipelineSummary pipeline = 1;
+}
+
+message UpdatePipelineVersionRequest {
+  PipelineSpec pipeline = 1;
+}
+
+message UpdatePipelineVersionResponse {
+  PipelineSummary pipeline = 1;
+}
+
+message GetPipelineRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+  optional uint32 version = 3;
+}
+
+message GetPipelineResponse {
+  PipelineSpec pipeline = 1;
+}
+
+message ListPipelinesRequest {
+  optional string tenant_id = 1;
+  optional DeploymentState deployment_state = 2;
+}
+
+message ListPipelinesResponse {
+  repeated PipelineSummary pipelines = 1;
+}
+
+message DeployPipelineRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+  uint32 version = 3;
+}
+
+message DeployPipelineResponse {
+  DeploymentState deployment_state = 1;
+}
+
+message PausePipelineRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+}
+
+message PausePipelineResponse {
+  DeploymentState deployment_state = 1;
+}
+
+message ResumePipelineRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+}
+
+message ResumePipelineResponse {
+  DeploymentState deployment_state = 1;
+}
+
+message RequestReplayRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+  uint64 from_offset = 3;
+  optional uint64 to_offset = 4;
+  string reason = 5;
+}
+
+message RequestReplayResponse {
+  ReplayJob replay_job = 1;
+}
+
+message GetReplayJobRequest {
+  string tenant_id = 1;
+  string replay_job_id = 2;
+}
+
+message GetReplayJobResponse {
+  ReplayJob replay_job = 1;
+}
+
+message RegisterTopicRequest {
+  RegisteredTopic topic = 1;
+}
+
+message RegisterTopicResponse {
+  RegisteredTopic topic = 1;
+}
+
+message GetTopicRequest {
+  string tenant_id = 1;
+  string topic_name = 2;
+}
+
+message GetTopicResponse {
+  RegisteredTopic topic = 1;
+}
+
+message ListTopicsRequest {
+  optional string tenant_id = 1;
+}
+
+message ListTopicsResponse {
+  repeated TopicSummary topics = 1;
+}
+
+message GetRunStatusRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+}
+
+message GetRunStatusResponse {
+  PipelineRunStatus run_status = 1;
+}
+
+message ListAssignmentsRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+}
+
+message ListAssignmentsResponse {
+  repeated PartitionAssignment assignments = 1;
+}
+
+message GetCheckpointHistoryRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+}
+
+message GetCheckpointHistoryResponse {
+  repeated CheckpointSummary checkpoints = 1;
+}
+
+message ListDeadLettersRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+}
+
+message ListDeadLettersResponse {
+  repeated DeadLetterRecord dead_letters = 1;
+}
+
+message PipelineSpec {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+  uint32 version = 3;
+  repeated SourceTopic sources = 4;
+  repeated OperatorNode operators = 5;
+  repeated SinkSpec sinks = 6;
+  DeploymentConfig deployment = 7;
+  ReplayPolicy replay_policy = 8;
+  DeploymentState deployment_state = 9;
+}
+
+message SourceTopic {
+  string source_id = 1;
+  string topic_name = 2;
+  uint32 partition_count = 3;
+  string partition_key = 4;
+  EventEncoding encoding = 5;
+}
+
+message OperatorNode {
+  string operator_id = 1;
+  repeated string upstream_ids = 2;
+  OperatorKind kind = 3;
+}
+
+message OperatorKind {
+  oneof kind {
+    FilterOperator filter = 1;
+    MapOperator map = 2;
+    KeyByOperator key_by = 3;
+    WindowOperator window = 4;
+    AggregateOperator aggregate = 5;
+    JoinOperator join = 6;
+    EnrichOperator enrich = 7;
+  }
+}
+
+message FilterOperator {
+  string expression = 1;
+}
+
+message MapOperator {
+  string projection = 1;
+}
+
+message KeyByOperator {
+  string key_field = 1;
+  uint32 partition_count = 2;
+}
+
+message WindowOperator {
+  WindowSpec spec = 1;
+}
+
+message AggregateOperator {
+  AggregateFunction function = 1;
+  uint32 state_ttl_secs = 2;
+}
+
+message JoinOperator {
+  JoinKind kind = 1;
+  string key_field = 2;
+  uint32 within_secs = 3;
+}
+
+message EnrichOperator {
+  string table_name = 1;
+  string key_field = 2;
+}
+
+message WindowSpec {
+  WindowKind kind = 1;
+  uint32 size_secs = 2;
+  optional uint32 slide_secs = 3;
+  uint32 grace_secs = 4;
+}
+
+message SinkSpec {
+  string sink_id = 1;
+  string upstream_id = 2;
+  SinkKind kind = 3;
+}
+
+message SinkKind {
+  oneof kind {
+    KafkaSink kafka = 1;
+    MaterializedViewSink materialized_view = 2;
+    ObjectStorageSink object_storage = 3;
+  }
+}
+
+message KafkaSink {
+  string topic_name = 1;
+  uint32 partition_count = 2;
+  string partition_key = 3;
+}
+
+message MaterializedViewSink {
+  string view_name = 1;
+}
+
+message ObjectStorageSink {
+  string bucket = 1;
+  string prefix = 2;
+}
+
+message DeploymentConfig {
+  uint32 parallelism = 1;
+  uint32 checkpoint_interval_secs = 2;
+  uint32 max_in_flight_messages = 3;
+}
+
+message ReplayPolicy {
+  bool allow_manual_replay = 1;
+  uint32 retention_hours = 2;
+}
+
+message PipelineSummary {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+  uint32 version = 3;
+  DeploymentState deployment_state = 4;
+}
+
+message RegisteredTopic {
+  string tenant_id = 1;
+  string topic_name = 2;
+  uint32 partition_count = 3;
+  uint32 retention_hours = 4;
+}
+
+message TopicSummary {
+  string tenant_id = 1;
+  string topic_name = 2;
+  uint32 partition_count = 3;
+}
+
+message PipelineRunStatus {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+  RunStatus state = 3;
+  uint64 consumer_lag = 4;
+  uint32 checkpoint_age_secs = 5;
+}
+
+message PartitionAssignment {
+  uint32 partition_id = 1;
+  string worker_id = 2;
+  uint64 lease_epoch = 3;
+}
+
+message CheckpointSummary {
+  uint32 partition_id = 1;
+  uint64 offset = 2;
+  string snapshot_uri = 3;
+}
+
+message DeadLetterRecord {
+  string record_key = 1;
+  string failure_reason = 2;
+  bool retryable = 3;
+}
+
+message ReplayJob {
+  string replay_job_id = 1;
+  string tenant_id = 2;
+  string pipeline_id = 3;
+  ReplayJobStatus status = 4;
+}
+
+enum DeploymentState {
+  DEPLOYMENT_STATE_UNSPECIFIED = 0;
+  DEPLOYMENT_STATE_DRAFT = 1;
+  DEPLOYMENT_STATE_VALIDATED = 2;
+  DEPLOYMENT_STATE_DEPLOYING = 3;
+  DEPLOYMENT_STATE_RUNNING = 4;
+  DEPLOYMENT_STATE_PAUSED = 5;
+  DEPLOYMENT_STATE_FAILED = 6;
+}
+
+enum WindowKind {
+  WINDOW_KIND_UNSPECIFIED = 0;
+  WINDOW_KIND_TUMBLING = 1;
+  WINDOW_KIND_SLIDING = 2;
+}
+
+enum AggregateFunction {
+  AGGREGATE_FUNCTION_UNSPECIFIED = 0;
+  AGGREGATE_FUNCTION_COUNT = 1;
+  AGGREGATE_FUNCTION_SUM = 2;
+  AGGREGATE_FUNCTION_MIN = 3;
+  AGGREGATE_FUNCTION_MAX = 4;
+  AGGREGATE_FUNCTION_AVERAGE = 5;
+}
+
+enum JoinKind {
+  JOIN_KIND_UNSPECIFIED = 0;
+  JOIN_KIND_INNER = 1;
+  JOIN_KIND_LEFT = 2;
+}
+
+enum EventEncoding {
+  EVENT_ENCODING_UNSPECIFIED = 0;
+  EVENT_ENCODING_JSON = 1;
+  EVENT_ENCODING_AVRO = 2;
+  EVENT_ENCODING_PROTOBUF = 3;
+}
+
+enum RunStatus {
+  RUN_STATUS_UNSPECIFIED = 0;
+  RUN_STATUS_PENDING = 1;
+  RUN_STATUS_DEPLOYING = 2;
+  RUN_STATUS_RUNNING = 3;
+  RUN_STATUS_REBALANCING = 4;
+  RUN_STATUS_PAUSED = 5;
+  RUN_STATUS_FAILED = 6;
+}
+
+enum ReplayJobStatus {
+  REPLAY_JOB_STATUS_UNSPECIFIED = 0;
+  REPLAY_JOB_STATUS_PENDING = 1;
+  REPLAY_JOB_STATUS_RUNNING = 2;
+  REPLAY_JOB_STATUS_SUCCEEDED = 3;
+  REPLAY_JOB_STATUS_FAILED = 4;
+}
