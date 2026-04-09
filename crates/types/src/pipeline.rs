@@ -1,8 +1,9 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PipelineSpec {
     pub tenant_id: String,
     pub pipeline_id: String,
@@ -348,7 +349,7 @@ impl PipelineSpec {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceTopic {
     pub source_id: String,
     pub topic_name: String,
@@ -357,7 +358,7 @@ pub struct SourceTopic {
     pub encoding: EventEncoding,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OperatorNode {
     pub operator_id: String,
     pub upstream_ids: Vec<String>,
@@ -487,7 +488,7 @@ impl OperatorNode {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum OperatorKind {
     Filter {
         expression: String,
@@ -515,7 +516,7 @@ pub enum OperatorKind {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WindowSpec {
     pub kind: WindowKind,
     pub size_secs: u32,
@@ -523,13 +524,13 @@ pub struct WindowSpec {
     pub grace_secs: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum WindowKind {
     Tumbling,
     Sliding,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum AggregateFunction {
     Count,
     Sum,
@@ -538,27 +539,27 @@ pub enum AggregateFunction {
     Average,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum JoinKind {
     Inner,
     Left,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EventEncoding {
     Json,
     Avro,
     Protobuf,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SinkSpec {
     pub sink_id: String,
     pub upstream_id: String,
     pub kind: SinkKind,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SinkKind {
     Kafka {
         topic_name: String,
@@ -574,20 +575,20 @@ pub enum SinkKind {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeploymentConfig {
     pub parallelism: u16,
     pub checkpoint_interval_secs: u32,
     pub max_in_flight_messages: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReplayPolicy {
     pub allow_manual_replay: bool,
     pub retention_hours: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum DeploymentState {
     Draft,
     Validated,
