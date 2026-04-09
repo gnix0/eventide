@@ -9,24 +9,25 @@ pub async fn run_service(config: ServiceRuntimeConfig) -> Result<()> {
     info!(
         service = config.service_name.as_str(),
         bind_addr = config.bind_addr,
+        database_url = config.database_url,
         metrics_addr = config.metrics_addr,
         "service bootstrap complete; runtime endpoints are not wired yet"
     );
 
-    tokio::signal::ctrl_c().await?;
-
-    info!(
-        service = config.service_name.as_str(),
-        "shutdown signal received"
-    );
-    Ok(())
+    wait_for_shutdown(config.service_name.as_str()).await
 }
 
-fn init_tracing(log_filter: &str) {
+pub fn init_tracing(log_filter: &str) {
     let filter = EnvFilter::try_new(log_filter).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .try_init();
+}
+
+pub async fn wait_for_shutdown(service_name: &str) -> Result<()> {
+    tokio::signal::ctrl_c().await?;
+    info!(service = service_name, "shutdown signal received");
+    Ok(())
 }
