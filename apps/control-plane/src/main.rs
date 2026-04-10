@@ -1,9 +1,12 @@
 use anyhow::Result;
+use event_pipeline_auth::{OidcSettings, OidcTokenValidator};
 use event_pipeline_config::ServiceRuntimeConfig;
-use event_pipeline_control_plane_app::MetadataService;
+use event_pipeline_control_plane_app::{IdentityService, MetadataService};
 use event_pipeline_postgres_store::PostgresMetadataRepository;
 use event_pipeline_runtime::{init_tracing, wait_for_shutdown};
-use event_pipeline_types::{ListPipelinesRequest, ListTopicsRequest, ServiceName};
+use event_pipeline_types::{
+    ListPipelinesRequest, ListTenantsRequest, ListTopicsRequest, ServiceName,
+};
 use std::sync::Arc;
 use tracing::info;
 
@@ -16,7 +19,7 @@ async fn main() -> Result<()> {
 
     init_tracing(&config.log_filter);
 
-    let repository = PostgresMetadataRepository::connect(&config.database_url).await?;
+    let repository = Arc::new(PostgresMetadataRepository::connect(&config.database_url).await?);
     repository.migrate().await?;
 
     if migrate_only {
@@ -24,7 +27,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let service = MetadataService::new(Arc::new(repository));
+    let service = MetadataService::new(repository.clone());
+    let identity_service = IdentityService::new(repository);
     let pipelines = service
         .list_pipelines(ListPipelinesRequest::default())
         .await?
@@ -35,12 +39,34 @@ async fn main() -> Result<()> {
         .await?
         .topics
         .len();
+    let tenants = identity_service
+        .list_tenants(ListTenantsRequest)
+        .await?
+        .tenants
+        .len();
+
+    let oidc_validator_enabled = config.oidc_public_key_pem.is_some();
+    let _validator = config
+        .oidc_public_key_pem
+        .as_ref()
+        .map(|public_key_pem| {
+            OidcTokenValidator::new(OidcSettings {
+                issuer: config.oidc_issuer_url.clone(),
+                audience: config.oidc_audience.clone(),
+                public_key_pem: public_key_pem.clone(),
+            })
+        })
+        .transpose()?;
 
     info!(
         service = ServiceName::ControlPlane.as_str(),
         bind_addr = config.bind_addr,
         database_url = config.database_url,
+        oidc_issuer = config.oidc_issuer_url,
+        oidc_audience = config.oidc_audience,
+        oidc_validator_enabled,
         pipeline_count = pipelines,
+        tenant_count = tenants,
         topic_count = topics,
         "control-plane metadata service initialized"
     );

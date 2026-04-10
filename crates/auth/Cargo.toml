@@ -1,5 +1,5 @@
 [package]
-name = "event-pipeline-control-plane-app"
+name = "event-pipeline-auth"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,7 +8,6 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 event-pipeline-types = { path = "../types" }
-tokio.workspace = true
-uuid.workspace = true
+jsonwebtoken.workspace = true
+serde.workspace = true

@@ -1,15 +1,21 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use event_pipeline_types::{
-    CreatePipelineRequest, CreatePipelineResponse, DeploymentState, GetPipelineRequest,
-    GetPipelineResponse, GetTopicRequest, GetTopicResponse, ListPipelinesRequest,
-    ListPipelinesResponse, ListTopicsRequest, ListTopicsResponse, PipelineSpec, PipelineSummary,
-    RegisterTopicRequest, RegisterTopicResponse, RegisteredTopic, TopicSummary,
+    AssignRoleBindingRequest, AssignRoleBindingResponse, AuthenticatedPrincipal,
+    CreatePipelineRequest, CreatePipelineResponse, CreateServiceAccountRequest,
+    CreateServiceAccountResponse, CreateTenantRequest, CreateTenantResponse, DeploymentState,
+    GetPipelineRequest, GetPipelineResponse, GetTenantRequest, GetTenantResponse, GetTopicRequest,
+    GetTopicResponse, ListPipelinesRequest, ListPipelinesResponse, ListRoleBindingsRequest,
+    ListRoleBindingsResponse, ListServiceAccountsRequest, ListServiceAccountsResponse,
+    ListTenantsRequest, ListTenantsResponse, ListTopicsRequest, ListTopicsResponse, PipelineSpec,
+    PipelineSummary, PlatformRole, RegisterTopicRequest, RegisterTopicResponse, RegisteredTopic,
+    RoleBinding, ServiceAccount, SubjectKind, TenantRecord, TenantSummary, TopicSummary,
     UpdatePipelineVersionRequest, UpdatePipelineVersionResponse,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 #[async_trait]
 pub trait MetadataRepository: Send + Sync {
@@ -30,6 +36,20 @@ pub trait MetadataRepository: Send + Sync {
     async fn get_topic(&self, tenant_id: &str, topic_name: &str)
     -> Result<Option<RegisteredTopic>>;
     async fn list_topics(&self, tenant_id: Option<&str>) -> Result<Vec<TopicSummary>>;
+    async fn upsert_tenant(&self, tenant: &TenantRecord) -> Result<TenantSummary>;
+    async fn get_tenant(&self, tenant_id: &str) -> Result<Option<TenantRecord>>;
+    async fn list_tenants(&self) -> Result<Vec<TenantSummary>>;
+    async fn assign_role_binding(&self, binding: &RoleBinding) -> Result<RoleBinding>;
+    async fn list_role_bindings(
+        &self,
+        tenant_id: Option<&str>,
+        subject_id: Option<&str>,
+    ) -> Result<Vec<RoleBinding>>;
+    async fn create_service_account(
+        &self,
+        service_account: &ServiceAccount,
+    ) -> Result<ServiceAccount>;
+    async fn list_service_accounts(&self, tenant_id: Option<&str>) -> Result<Vec<ServiceAccount>>;
 }
 
 #[derive(Clone)]
@@ -114,6 +134,147 @@ impl MetadataService {
     }
 }
 
+#[derive(Clone)]
+pub struct IdentityService {
+    repository: Arc<dyn MetadataRepository>,
+}
+
+impl IdentityService {
+    #[must_use]
+    pub fn new(repository: Arc<dyn MetadataRepository>) -> Self {
+        Self { repository }
+    }
+
+    pub async fn create_tenant(
+        &self,
+        request: CreateTenantRequest,
+    ) -> Result<CreateTenantResponse> {
+        validate_tenant(&request.tenant)?;
+        let tenant = self.repository.upsert_tenant(&request.tenant).await?;
+        Ok(CreateTenantResponse { tenant })
+    }
+
+    pub async fn get_tenant(&self, request: GetTenantRequest) -> Result<GetTenantResponse> {
+        let tenant = self
+            .repository
+            .get_tenant(&request.tenant_id)
+            .await?
+            .ok_or_else(|| anyhow!("tenant not found"))?;
+
+        Ok(GetTenantResponse { tenant })
+    }
+
+    pub async fn list_tenants(&self, _request: ListTenantsRequest) -> Result<ListTenantsResponse> {
+        let tenants = self.repository.list_tenants().await?;
+        Ok(ListTenantsResponse { tenants })
+    }
+
+    pub async fn assign_role_binding(
+        &self,
+        request: AssignRoleBindingRequest,
+    ) -> Result<AssignRoleBindingResponse> {
+        validate_role_binding(&request.binding)?;
+        let binding = self
+            .repository
+            .assign_role_binding(&request.binding)
+            .await?;
+        Ok(AssignRoleBindingResponse { binding })
+    }
+
+    pub async fn list_role_bindings(
+        &self,
+        request: ListRoleBindingsRequest,
+    ) -> Result<ListRoleBindingsResponse> {
+        let bindings = self
+            .repository
+            .list_role_bindings(request.tenant_id.as_deref(), request.subject_id.as_deref())
+            .await?;
+
+        Ok(ListRoleBindingsResponse { bindings })
+    }
+
+    pub async fn create_service_account(
+        &self,
+        request: CreateServiceAccountRequest,
+    ) -> Result<CreateServiceAccountResponse> {
+        if request.tenant_id.trim().is_empty() {
+            bail!("tenant id must not be empty");
+        }
+
+        if request.display_name.trim().is_empty() {
+            bail!("service account display name must not be empty");
+        }
+
+        if self
+            .repository
+            .get_tenant(&request.tenant_id)
+            .await?
+            .is_none()
+        {
+            bail!("tenant not found");
+        }
+
+        let service_account = ServiceAccount {
+            service_account_id: Uuid::now_v7().to_string(),
+            tenant_id: request.tenant_id.clone(),
+            client_id: format!(
+                "{}-{}-{}",
+                request.tenant_id,
+                slugify(&request.display_name),
+                &Uuid::now_v7().simple().to_string()[..8]
+            ),
+            display_name: request.display_name,
+            enabled: true,
+        };
+
+        let service_account = self
+            .repository
+            .create_service_account(&service_account)
+            .await?;
+        Ok(CreateServiceAccountResponse { service_account })
+    }
+
+    pub async fn list_service_accounts(
+        &self,
+        request: ListServiceAccountsRequest,
+    ) -> Result<ListServiceAccountsResponse> {
+        let service_accounts = self
+            .repository
+            .list_service_accounts(request.tenant_id.as_deref())
+            .await?;
+
+        Ok(ListServiceAccountsResponse { service_accounts })
+    }
+
+    pub async fn authorize(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        tenant_id: &str,
+        required_role: PlatformRole,
+    ) -> Result<()> {
+        if tenant_id.trim().is_empty() {
+            bail!("tenant id must not be empty");
+        }
+
+        let bindings = self
+            .repository
+            .list_role_bindings(Some(tenant_id), Some(&principal.subject_id))
+            .await?;
+
+        if bindings.iter().any(|binding| {
+            binding.tenant_id.is_none() && binding.role == PlatformRole::PlatformAdmin
+        }) {
+            return Ok(());
+        }
+
+        if has_permission(&bindings, tenant_id, required_role) {
+            return Ok(());
+        }
+
+        bail!("principal is not authorized for the requested tenant action");
+    }
+}
+
 fn validate_topic(topic: &RegisteredTopic) -> Result<()> {
     if topic.tenant_id.trim().is_empty() {
         bail!("tenant id must not be empty");
@@ -134,11 +295,89 @@ fn validate_topic(topic: &RegisteredTopic) -> Result<()> {
     Ok(())
 }
 
+fn validate_tenant(tenant: &TenantRecord) -> Result<()> {
+    if tenant.tenant_id.trim().is_empty() {
+        bail!("tenant id must not be empty");
+    }
+
+    if tenant.display_name.trim().is_empty() {
+        bail!("tenant display name must not be empty");
+    }
+
+    if tenant.oidc_realm.trim().is_empty() {
+        bail!("tenant oidc realm must not be empty");
+    }
+
+    Ok(())
+}
+
+fn validate_role_binding(binding: &RoleBinding) -> Result<()> {
+    if binding.subject_id.trim().is_empty() {
+        bail!("role binding subject id must not be empty");
+    }
+
+    if binding.role != PlatformRole::PlatformAdmin && binding.tenant_id.is_none() {
+        bail!("tenant-scoped roles must provide a tenant id");
+    }
+
+    Ok(())
+}
+
+fn has_permission(bindings: &[RoleBinding], tenant_id: &str, required_role: PlatformRole) -> bool {
+    bindings.iter().any(|binding| {
+        let tenant_matches = binding
+            .tenant_id
+            .as_deref()
+            .is_none_or(|value| value == tenant_id);
+        tenant_matches && role_satisfies(binding.role, required_role)
+    })
+}
+
+fn role_satisfies(granted_role: PlatformRole, required_role: PlatformRole) -> bool {
+    if granted_role == PlatformRole::PlatformAdmin || granted_role == PlatformRole::TenantAdmin {
+        return true;
+    }
+
+    if granted_role == required_role {
+        return true;
+    }
+
+    matches!(
+        (granted_role, required_role),
+        (PlatformRole::PipelineEditor, PlatformRole::PipelineViewer)
+            | (PlatformRole::TopicEditor, PlatformRole::TopicViewer)
+    )
+}
+
+fn slugify(value: &str) -> String {
+    let slug: String = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    slug.trim_matches('-')
+        .split('-')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+type RoleBindingKey = (SubjectKind, String, Option<String>, PlatformRole);
+
 #[derive(Default)]
 pub struct InMemoryMetadataRepository {
     pipelines: RwLock<BTreeMap<(String, String, u32), PipelineSpec>>,
     current_versions: RwLock<BTreeMap<(String, String), u32>>,
     topics: RwLock<BTreeMap<(String, String), RegisteredTopic>>,
+    tenants: RwLock<BTreeMap<String, TenantRecord>>,
+    role_bindings: RwLock<BTreeSet<RoleBindingKey>>,
+    service_accounts: RwLock<BTreeMap<String, ServiceAccount>>,
 }
 
 #[async_trait]
@@ -315,16 +554,126 @@ impl MetadataRepository for InMemoryMetadataRepository {
         });
         Ok(topics)
     }
+
+    async fn upsert_tenant(&self, tenant: &TenantRecord) -> Result<TenantSummary> {
+        self.tenants
+            .write()
+            .await
+            .insert(tenant.tenant_id.clone(), tenant.clone());
+
+        Ok(TenantSummary {
+            tenant_id: tenant.tenant_id.clone(),
+            display_name: tenant.display_name.clone(),
+            oidc_realm: tenant.oidc_realm.clone(),
+            enabled: tenant.enabled,
+        })
+    }
+
+    async fn get_tenant(&self, tenant_id: &str) -> Result<Option<TenantRecord>> {
+        Ok(self.tenants.read().await.get(tenant_id).cloned())
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<TenantSummary>> {
+        let mut tenants: Vec<_> = self
+            .tenants
+            .read()
+            .await
+            .values()
+            .map(|tenant| TenantSummary {
+                tenant_id: tenant.tenant_id.clone(),
+                display_name: tenant.display_name.clone(),
+                oidc_realm: tenant.oidc_realm.clone(),
+                enabled: tenant.enabled,
+            })
+            .collect();
+
+        tenants.sort_by(|left, right| left.tenant_id.cmp(&right.tenant_id));
+        Ok(tenants)
+    }
+
+    async fn assign_role_binding(&self, binding: &RoleBinding) -> Result<RoleBinding> {
+        self.role_bindings.write().await.insert((
+            binding.subject_kind,
+            binding.subject_id.clone(),
+            binding.tenant_id.clone(),
+            binding.role,
+        ));
+        Ok(binding.clone())
+    }
+
+    async fn list_role_bindings(
+        &self,
+        tenant_id: Option<&str>,
+        subject_id: Option<&str>,
+    ) -> Result<Vec<RoleBinding>> {
+        let mut bindings = Vec::new();
+        for (subject_kind, stored_subject_id, stored_tenant_id, role) in
+            self.role_bindings.read().await.iter()
+        {
+            if subject_id.is_some_and(|subject_id| subject_id != stored_subject_id) {
+                continue;
+            }
+
+            if tenant_id.is_some_and(|tenant_id| {
+                stored_tenant_id
+                    .as_deref()
+                    .is_some_and(|value| value != tenant_id)
+            }) {
+                continue;
+            }
+
+            bindings.push(RoleBinding {
+                subject_kind: *subject_kind,
+                subject_id: stored_subject_id.clone(),
+                tenant_id: stored_tenant_id.clone(),
+                role: *role,
+            });
+        }
+
+        Ok(bindings)
+    }
+
+    async fn create_service_account(
+        &self,
+        service_account: &ServiceAccount,
+    ) -> Result<ServiceAccount> {
+        self.service_accounts.write().await.insert(
+            service_account.service_account_id.clone(),
+            service_account.clone(),
+        );
+        Ok(service_account.clone())
+    }
+
+    async fn list_service_accounts(&self, tenant_id: Option<&str>) -> Result<Vec<ServiceAccount>> {
+        let mut service_accounts: Vec<_> = self
+            .service_accounts
+            .read()
+            .await
+            .values()
+            .filter(|service_account| {
+                tenant_id.is_none_or(|tenant_id| tenant_id == service_account.tenant_id)
+            })
+            .cloned()
+            .collect();
+
+        service_accounts.sort_by(|left, right| {
+            (&left.tenant_id, &left.client_id).cmp(&(&right.tenant_id, &right.client_id))
+        });
+        Ok(service_accounts)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{InMemoryMetadataRepository, MetadataService};
+    use super::{IdentityService, InMemoryMetadataRepository, MetadataRepository, MetadataService};
     use event_pipeline_types::{
-        AggregateFunction, CreatePipelineRequest, DeploymentConfig, DeploymentState, EventEncoding,
-        ListPipelinesRequest, ListTopicsRequest, OperatorKind, OperatorNode, PipelineSpec,
-        RegisterTopicRequest, RegisteredTopic, ReplayPolicy, SinkKind, SinkSpec, SourceTopic,
-        UpdatePipelineVersionRequest, WindowKind, WindowSpec,
+        AggregateFunction, AssignRoleBindingRequest, AuthenticatedPrincipal, CreatePipelineRequest,
+        CreateServiceAccountRequest, CreateTenantRequest, DeploymentState, EventEncoding,
+        ListPipelinesRequest, ListRoleBindingsRequest, ListServiceAccountsRequest,
+        ListTenantsRequest, ListTopicsRequest, OperatorKind, OperatorNode, PipelineSpec,
+        PlatformRole, RegisterTopicRequest, RegisteredTopic, RoleBinding, SinkKind, SinkSpec,
+        SourceTopic, SubjectKind, TenantRecord, UpdatePipelineVersionRequest, WindowKind,
+        WindowSpec,
     };
     use std::sync::Arc;
 
@@ -425,6 +774,111 @@ mod tests {
         assert_eq!(response.topics[0].topic_name, "orders");
     }
 
+    #[tokio::test]
+    async fn creates_tenants_role_bindings_and_service_accounts() {
+        let repository = Arc::new(InMemoryMetadataRepository::default());
+        let service = IdentityService::new(repository);
+
+        service
+            .create_tenant(CreateTenantRequest {
+                tenant: TenantRecord {
+                    tenant_id: String::from("tenant-acme"),
+                    display_name: String::from("Acme"),
+                    oidc_realm: String::from("event-pipeline"),
+                    enabled: true,
+                },
+            })
+            .await
+            .expect("tenant creation should succeed");
+
+        service
+            .assign_role_binding(AssignRoleBindingRequest {
+                binding: RoleBinding {
+                    subject_kind: SubjectKind::User,
+                    subject_id: String::from("user-123"),
+                    tenant_id: Some(String::from("tenant-acme")),
+                    role: PlatformRole::TenantAdmin,
+                },
+            })
+            .await
+            .expect("role assignment should succeed");
+
+        let service_account = service
+            .create_service_account(CreateServiceAccountRequest {
+                tenant_id: String::from("tenant-acme"),
+                display_name: String::from("Control Plane"),
+            })
+            .await
+            .expect("service account creation should succeed")
+            .service_account;
+
+        let tenants = service
+            .list_tenants(ListTenantsRequest)
+            .await
+            .expect("tenant listing should succeed");
+        let bindings = service
+            .list_role_bindings(ListRoleBindingsRequest {
+                tenant_id: Some(String::from("tenant-acme")),
+                subject_id: Some(String::from("user-123")),
+            })
+            .await
+            .expect("role binding listing should succeed");
+        let service_accounts = service
+            .list_service_accounts(ListServiceAccountsRequest {
+                tenant_id: Some(String::from("tenant-acme")),
+            })
+            .await
+            .expect("service account listing should succeed");
+
+        assert_eq!(tenants.tenants.len(), 1);
+        assert_eq!(bindings.bindings.len(), 1);
+        assert_eq!(service_accounts.service_accounts, vec![service_account]);
+    }
+
+    #[tokio::test]
+    async fn authorizes_tenant_admins_for_tenant_scoped_actions() {
+        let repository = Arc::new(InMemoryMetadataRepository::default());
+        let service = IdentityService::new(repository.clone());
+
+        service
+            .create_tenant(CreateTenantRequest {
+                tenant: TenantRecord {
+                    tenant_id: String::from("tenant-acme"),
+                    display_name: String::from("Acme"),
+                    oidc_realm: String::from("event-pipeline"),
+                    enabled: true,
+                },
+            })
+            .await
+            .expect("tenant creation should succeed");
+
+        repository
+            .assign_role_binding(&RoleBinding {
+                subject_kind: SubjectKind::User,
+                subject_id: String::from("user-123"),
+                tenant_id: Some(String::from("tenant-acme")),
+                role: PlatformRole::TenantAdmin,
+            })
+            .await
+            .expect("binding should be stored");
+
+        service
+            .authorize(
+                &AuthenticatedPrincipal {
+                    subject_kind: SubjectKind::User,
+                    subject_id: String::from("user-123"),
+                    preferred_username: Some(String::from("alice")),
+                    issuer: String::from("issuer"),
+                    audience: vec![String::from("event-pipeline-api")],
+                    realm_roles: Vec::new(),
+                },
+                "tenant-acme",
+                PlatformRole::PipelineEditor,
+            )
+            .await
+            .expect("tenant admin should be authorized");
+    }
+
     fn valid_pipeline(version: u32) -> PipelineSpec {
         PipelineSpec {
             tenant_id: String::from("tenant-acme"),
@@ -471,12 +925,12 @@ mod tests {
                     view_name: String::from("orders_throughput"),
                 },
             }],
-            deployment: DeploymentConfig {
+            deployment: event_pipeline_types::DeploymentConfig {
                 parallelism: 12,
                 checkpoint_interval_secs: 30,
                 max_in_flight_messages: 5_000,
             },
-            replay_policy: ReplayPolicy {
+            replay_policy: event_pipeline_types::ReplayPolicy {
                 allow_manual_replay: true,
                 retention_hours: 168,
             },

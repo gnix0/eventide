@@ -1,3 +1,4 @@
+use crate::auth::{RoleBinding, ServiceAccount, TenantRecord};
 use crate::pipeline::{DeploymentState, PipelineSpec};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +114,76 @@ pub struct RegisterTopicResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateTenantRequest {
+    pub tenant: TenantRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateTenantResponse {
+    pub tenant: TenantSummary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetTenantRequest {
+    pub tenant_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GetTenantResponse {
+    pub tenant: TenantRecord,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListTenantsRequest;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListTenantsResponse {
+    pub tenants: Vec<TenantSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignRoleBindingRequest {
+    pub binding: RoleBinding,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignRoleBindingResponse {
+    pub binding: RoleBinding,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListRoleBindingsRequest {
+    pub tenant_id: Option<String>,
+    pub subject_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListRoleBindingsResponse {
+    pub bindings: Vec<RoleBinding>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateServiceAccountRequest {
+    pub tenant_id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateServiceAccountResponse {
+    pub service_account: ServiceAccount,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListServiceAccountsRequest {
+    pub tenant_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListServiceAccountsResponse {
+    pub service_accounts: Vec<ServiceAccount>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GetTopicRequest {
     pub tenant_id: String,
     pub topic_name: String,
@@ -198,6 +269,14 @@ pub struct TopicSummary {
     pub tenant_id: String,
     pub topic_name: String,
     pub partition_count: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TenantSummary {
+    pub tenant_id: String,
+    pub display_name: String,
+    pub oidc_realm: String,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

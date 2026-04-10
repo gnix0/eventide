@@ -8,6 +8,7 @@ members = [
     "apps/sink-writer",
     "apps/state-manager",
     "crates/config",
+    "crates/auth",
     "crates/control-plane-app",
     "crates/postgres-store",
     "crates/runtime",
@@ -25,6 +26,7 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1.0.100"
 async-trait = "0.1.89"
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "json", "uuid", "migrate"] }
