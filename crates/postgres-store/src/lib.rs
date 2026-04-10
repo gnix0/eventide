@@ -2,12 +2,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use event_pipeline_control_plane_app::MetadataRepository;
 use event_pipeline_types::{
-    DeploymentState, PipelineSpec, PipelineSummary, RegisteredTopic, TopicSummary,
+    DeploymentState, PipelineSpec, PipelineSummary, PlatformRole, RegisteredTopic, RoleBinding,
+    ServiceAccount, SubjectKind, TenantRecord, TenantSummary, TopicSummary,
 };
 use sqlx::Row;
 use sqlx::migrate::Migrator;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use sqlx::types::Json;
+use uuid::Uuid;
 
 static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
@@ -35,12 +37,23 @@ impl PostgresMetadataRepository {
     async fn ensure_tenant<'a>(
         &self,
         tx: &mut sqlx::Transaction<'a, sqlx::Postgres>,
-        tenant_id: &str,
+        tenant: &TenantRecord,
     ) -> Result<()> {
         sqlx::query(
-            "insert into tenants (tenant_id) values ($1) on conflict (tenant_id) do nothing",
+            r#"
+            insert into tenants (tenant_id, display_name, oidc_realm, enabled)
+            values ($1, $2, $3, $4)
+            on conflict (tenant_id)
+            do update
+              set display_name = excluded.display_name,
+                  oidc_realm = excluded.oidc_realm,
+                  enabled = excluded.enabled
+            "#,
         )
-        .bind(tenant_id)
+        .bind(&tenant.tenant_id)
+        .bind(&tenant.display_name)
+        .bind(&tenant.oidc_realm)
+        .bind(tenant.enabled)
         .execute(tx.as_mut())
         .await?;
 
@@ -52,7 +65,16 @@ impl PostgresMetadataRepository {
 impl MetadataRepository for PostgresMetadataRepository {
     async fn create_pipeline(&self, pipeline: &PipelineSpec) -> Result<PipelineSummary> {
         let mut tx = self.pool.begin().await?;
-        self.ensure_tenant(&mut tx, &pipeline.tenant_id).await?;
+        self.ensure_tenant(
+            &mut tx,
+            &TenantRecord {
+                tenant_id: pipeline.tenant_id.clone(),
+                display_name: pipeline.tenant_id.clone(),
+                oidc_realm: String::from("event-pipeline"),
+                enabled: true,
+            },
+        )
+        .await?;
 
         let rows = sqlx::query(
             r#"
@@ -109,7 +131,16 @@ impl MetadataRepository for PostgresMetadataRepository {
 
     async fn update_pipeline_version(&self, pipeline: &PipelineSpec) -> Result<PipelineSummary> {
         let mut tx = self.pool.begin().await?;
-        self.ensure_tenant(&mut tx, &pipeline.tenant_id).await?;
+        self.ensure_tenant(
+            &mut tx,
+            &TenantRecord {
+                tenant_id: pipeline.tenant_id.clone(),
+                display_name: pipeline.tenant_id.clone(),
+                oidc_realm: String::from("event-pipeline"),
+                enabled: true,
+            },
+        )
+        .await?;
 
         let existing = sqlx::query(
             "select current_version from pipelines where tenant_id = $1 and pipeline_id = $2",
@@ -254,7 +285,16 @@ impl MetadataRepository for PostgresMetadataRepository {
 
     async fn register_topic(&self, topic: &RegisteredTopic) -> Result<RegisteredTopic> {
         let mut tx = self.pool.begin().await?;
-        self.ensure_tenant(&mut tx, &topic.tenant_id).await?;
+        self.ensure_tenant(
+            &mut tx,
+            &TenantRecord {
+                tenant_id: topic.tenant_id.clone(),
+                display_name: topic.tenant_id.clone(),
+                oidc_realm: String::from("event-pipeline"),
+                enabled: true,
+            },
+        )
+        .await?;
 
         sqlx::query(
             r#"
@@ -325,6 +365,166 @@ impl MetadataRepository for PostgresMetadataRepository {
             })
             .collect()
     }
+
+    async fn upsert_tenant(&self, tenant: &TenantRecord) -> Result<TenantSummary> {
+        let mut tx = self.pool.begin().await?;
+        self.ensure_tenant(&mut tx, tenant).await?;
+        tx.commit().await?;
+
+        Ok(TenantSummary {
+            tenant_id: tenant.tenant_id.clone(),
+            display_name: tenant.display_name.clone(),
+            oidc_realm: tenant.oidc_realm.clone(),
+            enabled: tenant.enabled,
+        })
+    }
+
+    async fn get_tenant(&self, tenant_id: &str) -> Result<Option<TenantRecord>> {
+        let row = sqlx::query(
+            r#"
+            select tenant_id, display_name, oidc_realm, enabled
+            from tenants
+            where tenant_id = $1
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(map_tenant).transpose()
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<TenantSummary>> {
+        let rows = sqlx::query(
+            r#"
+            select tenant_id, display_name, oidc_realm, enabled
+            from tenants
+            order by tenant_id
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(TenantSummary {
+                    tenant_id: row.try_get("tenant_id")?,
+                    display_name: row.try_get("display_name")?,
+                    oidc_realm: row.try_get("oidc_realm")?,
+                    enabled: row.try_get("enabled")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn assign_role_binding(&self, binding: &RoleBinding) -> Result<RoleBinding> {
+        sqlx::query(
+            r#"
+            insert into role_bindings (
+              binding_id,
+              subject_kind,
+              subject_id,
+              tenant_id,
+              role
+            )
+            values ($1, $2, $3, $4, $5)
+            on conflict (subject_kind, subject_id, tenant_id, role) do nothing
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(subject_kind_to_db(binding.subject_kind))
+        .bind(&binding.subject_id)
+        .bind(binding.tenant_id.as_deref())
+        .bind(role_to_db(binding.role))
+        .execute(&self.pool)
+        .await?;
+
+        Ok(binding.clone())
+    }
+
+    async fn list_role_bindings(
+        &self,
+        tenant_id: Option<&str>,
+        subject_id: Option<&str>,
+    ) -> Result<Vec<RoleBinding>> {
+        let rows = sqlx::query(
+            r#"
+            select subject_kind, subject_id, tenant_id, role
+            from role_bindings
+            where ($1::text is null or tenant_id = $1 or tenant_id is null)
+              and ($2::text is null or subject_id = $2)
+            order by subject_id, tenant_id, role
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(subject_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(RoleBinding {
+                    subject_kind: subject_kind_from_db(&row.try_get::<String, _>("subject_kind")?)?,
+                    subject_id: row.try_get("subject_id")?,
+                    tenant_id: row.try_get("tenant_id")?,
+                    role: role_from_db(&row.try_get::<String, _>("role")?)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn create_service_account(
+        &self,
+        service_account: &ServiceAccount,
+    ) -> Result<ServiceAccount> {
+        sqlx::query(
+            r#"
+            insert into service_accounts (
+              service_account_id,
+              tenant_id,
+              client_id,
+              display_name,
+              enabled
+            )
+            values ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(Uuid::parse_str(&service_account.service_account_id)?)
+        .bind(&service_account.tenant_id)
+        .bind(&service_account.client_id)
+        .bind(&service_account.display_name)
+        .bind(service_account.enabled)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(service_account.clone())
+    }
+
+    async fn list_service_accounts(&self, tenant_id: Option<&str>) -> Result<Vec<ServiceAccount>> {
+        let rows = sqlx::query(
+            r#"
+            select service_account_id, tenant_id, client_id, display_name, enabled
+            from service_accounts
+            where ($1::text is null or tenant_id = $1)
+            order by tenant_id, client_id
+            "#,
+        )
+        .bind(tenant_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(ServiceAccount {
+                    service_account_id: row.try_get::<Uuid, _>("service_account_id")?.to_string(),
+                    tenant_id: row.try_get("tenant_id")?,
+                    client_id: row.try_get("client_id")?,
+                    display_name: row.try_get("display_name")?,
+                    enabled: row.try_get("enabled")?,
+                })
+            })
+            .collect()
+    }
 }
 
 fn map_registered_topic(row: sqlx::postgres::PgRow) -> Result<RegisteredTopic> {
@@ -333,6 +533,15 @@ fn map_registered_topic(row: sqlx::postgres::PgRow) -> Result<RegisteredTopic> {
         topic_name: row.try_get("topic_name")?,
         partition_count: u16::try_from(row.try_get::<i32, _>("partition_count")?)?,
         retention_hours: u32::try_from(row.try_get::<i32, _>("retention_hours")?)?,
+    })
+}
+
+fn map_tenant(row: sqlx::postgres::PgRow) -> Result<TenantRecord> {
+    Ok(TenantRecord {
+        tenant_id: row.try_get("tenant_id")?,
+        display_name: row.try_get("display_name")?,
+        oidc_realm: row.try_get("oidc_realm")?,
+        enabled: row.try_get("enabled")?,
     })
 }
 
@@ -356,5 +565,45 @@ fn deployment_state_from_db(value: &str) -> Result<DeploymentState> {
         "paused" => Ok(DeploymentState::Paused),
         "failed" => Ok(DeploymentState::Failed),
         _ => Err(anyhow!("unknown deployment state: {value}")),
+    }
+}
+
+fn subject_kind_to_db(kind: SubjectKind) -> &'static str {
+    match kind {
+        SubjectKind::User => "user",
+        SubjectKind::ServiceAccount => "service_account",
+    }
+}
+
+fn subject_kind_from_db(value: &str) -> Result<SubjectKind> {
+    match value {
+        "user" => Ok(SubjectKind::User),
+        "service_account" => Ok(SubjectKind::ServiceAccount),
+        _ => Err(anyhow!("unknown subject kind: {value}")),
+    }
+}
+
+fn role_to_db(role: PlatformRole) -> &'static str {
+    match role {
+        PlatformRole::PlatformAdmin => "platform_admin",
+        PlatformRole::TenantAdmin => "tenant_admin",
+        PlatformRole::PipelineEditor => "pipeline_editor",
+        PlatformRole::PipelineViewer => "pipeline_viewer",
+        PlatformRole::TopicEditor => "topic_editor",
+        PlatformRole::TopicViewer => "topic_viewer",
+        PlatformRole::ReplayOperator => "replay_operator",
+    }
+}
+
+fn role_from_db(value: &str) -> Result<PlatformRole> {
+    match value {
+        "platform_admin" => Ok(PlatformRole::PlatformAdmin),
+        "tenant_admin" => Ok(PlatformRole::TenantAdmin),
+        "pipeline_editor" => Ok(PlatformRole::PipelineEditor),
+        "pipeline_viewer" => Ok(PlatformRole::PipelineViewer),
+        "topic_editor" => Ok(PlatformRole::TopicEditor),
+        "topic_viewer" => Ok(PlatformRole::TopicViewer),
+        "replay_operator" => Ok(PlatformRole::ReplayOperator),
+        _ => Err(anyhow!("unknown platform role: {value}")),
     }
 }

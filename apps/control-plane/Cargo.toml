@@ -8,6 +8,7 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+event-pipeline-auth = { path = "../../crates/auth" }
 event-pipeline-config = { path = "../../crates/config" }
 event-pipeline-control-plane-app = { path = "../../crates/control-plane-app" }
 event-pipeline-postgres-store = { path = "../../crates/postgres-store" }

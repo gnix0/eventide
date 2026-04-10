@@ -20,6 +20,16 @@ service TopicService {
   rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse);
 }
 
+service AdminService {
+  rpc CreateTenant(CreateTenantRequest) returns (CreateTenantResponse);
+  rpc GetTenant(GetTenantRequest) returns (GetTenantResponse);
+  rpc ListTenants(ListTenantsRequest) returns (ListTenantsResponse);
+  rpc AssignRoleBinding(AssignRoleBindingRequest) returns (AssignRoleBindingResponse);
+  rpc ListRoleBindings(ListRoleBindingsRequest) returns (ListRoleBindingsResponse);
+  rpc CreateServiceAccount(CreateServiceAccountRequest) returns (CreateServiceAccountResponse);
+  rpc ListServiceAccounts(ListServiceAccountsRequest) returns (ListServiceAccountsResponse);
+}
+
 service RunService {
   rpc GetRunStatus(GetRunStatusRequest) returns (GetRunStatusResponse);
   rpc ListAssignments(ListAssignmentsRequest) returns (ListAssignmentsResponse);
@@ -117,6 +127,62 @@ message RegisterTopicRequest {
 
 message RegisterTopicResponse {
   RegisteredTopic topic = 1;
+}
+
+message CreateTenantRequest {
+  TenantRecord tenant = 1;
+}
+
+message CreateTenantResponse {
+  TenantSummary tenant = 1;
+}
+
+message GetTenantRequest {
+  string tenant_id = 1;
+}
+
+message GetTenantResponse {
+  TenantRecord tenant = 1;
+}
+
+message ListTenantsRequest {}
+
+message ListTenantsResponse {
+  repeated TenantSummary tenants = 1;
+}
+
+message AssignRoleBindingRequest {
+  RoleBinding binding = 1;
+}
+
+message AssignRoleBindingResponse {
+  RoleBinding binding = 1;
+}
+
+message ListRoleBindingsRequest {
+  optional string tenant_id = 1;
+  optional string subject_id = 2;
+}
+
+message ListRoleBindingsResponse {
+  repeated RoleBinding bindings = 1;
+}
+
+message CreateServiceAccountRequest {
+  string tenant_id = 1;
+  string display_name = 2;
+}
+
+message CreateServiceAccountResponse {
+  ServiceAccount service_account = 1;
+}
+
+message ListServiceAccountsRequest {
+  optional string tenant_id = 1;
+}
+
+message ListServiceAccountsResponse {
+  repeated ServiceAccount service_accounts = 1;
 }
 
 message GetTopicRequest {
@@ -310,6 +376,35 @@ message TopicSummary {
   uint32 partition_count = 3;
 }
 
+message TenantRecord {
+  string tenant_id = 1;
+  string display_name = 2;
+  string oidc_realm = 3;
+  bool enabled = 4;
+}
+
+message TenantSummary {
+  string tenant_id = 1;
+  string display_name = 2;
+  string oidc_realm = 3;
+  bool enabled = 4;
+}
+
+message ServiceAccount {
+  string service_account_id = 1;
+  string tenant_id = 2;
+  string client_id = 3;
+  string display_name = 4;
+  bool enabled = 5;
+}
+
+message RoleBinding {
+  SubjectKind subject_kind = 1;
+  string subject_id = 2;
+  optional string tenant_id = 3;
+  PlatformRole role = 4;
+}
+
 message PipelineRunStatus {
   string tenant_id = 1;
   string pipeline_id = 2;
@@ -397,4 +492,21 @@ enum ReplayJobStatus {
   REPLAY_JOB_STATUS_RUNNING = 2;
   REPLAY_JOB_STATUS_SUCCEEDED = 3;
   REPLAY_JOB_STATUS_FAILED = 4;
+}
+
+enum SubjectKind {
+  SUBJECT_KIND_UNSPECIFIED = 0;
+  SUBJECT_KIND_USER = 1;
+  SUBJECT_KIND_SERVICE_ACCOUNT = 2;
+}
+
+enum PlatformRole {
+  PLATFORM_ROLE_UNSPECIFIED = 0;
+  PLATFORM_ROLE_PLATFORM_ADMIN = 1;
+  PLATFORM_ROLE_TENANT_ADMIN = 2;
+  PLATFORM_ROLE_PIPELINE_EDITOR = 3;
+  PLATFORM_ROLE_PIPELINE_VIEWER = 4;
+  PLATFORM_ROLE_TOPIC_EDITOR = 5;
+  PLATFORM_ROLE_TOPIC_VIEWER = 6;
+  PLATFORM_ROLE_REPLAY_OPERATOR = 7;
 }
