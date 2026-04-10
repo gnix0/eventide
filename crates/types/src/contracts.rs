@@ -1,4 +1,5 @@
 use crate::auth::{RoleBinding, ServiceAccount, TenantRecord};
+use crate::coordinator::{WorkerRecord, WorkerStatus};
 use crate::pipeline::{DeploymentState, PipelineSpec};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -224,6 +225,63 @@ pub struct ListAssignmentsRequest {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ListAssignmentsResponse {
     pub assignments: Vec<PartitionAssignment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterWorkerRequest {
+    pub worker: WorkerRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegisterWorkerResponse {
+    pub worker: WorkerRecord,
+    pub lease_ttl_secs: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeartbeatWorkerRequest {
+    pub worker_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeartbeatWorkerResponse {
+    pub worker: WorkerRecord,
+    pub lease_ttl_secs: u32,
+    pub assignments: Vec<PartitionAssignment>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListWorkersRequest {
+    pub status: Option<WorkerStatus>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ListWorkersResponse {
+    pub workers: Vec<WorkerRecord>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebalancePipelineRequest {
+    pub tenant_id: String,
+    pub pipeline_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebalancePipelineResponse {
+    pub version: u32,
+    pub lease_epoch: u64,
+    pub assignments: Vec<PartitionAssignment>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpireWorkerLeasesRequest {
+    pub stale_after_secs: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpireWorkerLeasesResponse {
+    pub expired_worker_ids: Vec<String>,
+    pub revoked_assignment_count: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

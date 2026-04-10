@@ -167,9 +167,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "event-pipeline-config",
+ "event-pipeline-coordinator-app",
+ "event-pipeline-postgres-store",
  "event-pipeline-runtime",
  "event-pipeline-types",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -444,12 +447,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "event-pipeline-coordinator-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "event-pipeline-types",
+ "tokio",
+]
+
+[[package]]
 name = "event-pipeline-postgres-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "event-pipeline-control-plane-app",
+ "event-pipeline-coordinator-app",
  "event-pipeline-types",
  "serde_json",
  "sqlx",

@@ -9,6 +9,7 @@ members = [
     "apps/state-manager",
     "crates/config",
     "crates/auth",
+    "crates/coordinator-app",
     "crates/control-plane-app",
     "crates/postgres-store",
     "crates/runtime",

@@ -6,6 +6,8 @@ pub struct ServiceRuntimeConfig {
     pub bind_addr: String,
     pub database_url: String,
     pub metrics_addr: String,
+    pub worker_lease_ttl_secs: u32,
+    pub worker_stale_after_secs: u32,
     pub oidc_audience: String,
     pub oidc_issuer_url: String,
     pub oidc_public_key_pem: Option<String>,
@@ -21,6 +23,14 @@ impl ServiceRuntimeConfig {
         });
         let metrics_addr =
             std::env::var("METRICS_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:9090"));
+        let worker_lease_ttl_secs = std::env::var("WORKER_LEASE_TTL_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(30);
+        let worker_stale_after_secs = std::env::var("WORKER_STALE_AFTER_SECS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(90);
         let oidc_audience =
             std::env::var("OIDC_AUDIENCE").unwrap_or_else(|_| String::from("event-pipeline-api"));
         let oidc_issuer_url = std::env::var("OIDC_ISSUER_URL")
@@ -36,6 +46,8 @@ impl ServiceRuntimeConfig {
             bind_addr,
             database_url,
             metrics_addr,
+            worker_lease_ttl_secs,
+            worker_stale_after_secs,
             oidc_audience,
             oidc_issuer_url,
             oidc_public_key_pem,

@@ -1,9 +1,11 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use event_pipeline_control_plane_app::MetadataRepository;
+use event_pipeline_coordinator_app::{CoordinatorRepository, LeaseExpiryOutcome};
 use event_pipeline_types::{
-    DeploymentState, PipelineSpec, PipelineSummary, PlatformRole, RegisteredTopic, RoleBinding,
-    ServiceAccount, SubjectKind, TenantRecord, TenantSummary, TopicSummary,
+    DeploymentState, PartitionAssignment, PipelineSpec, PipelineSummary, PlatformRole,
+    RegisteredTopic, RoleBinding, ServiceAccount, SubjectKind, TenantRecord, TenantSummary,
+    TopicSummary, WorkerRecord, WorkerStatus,
 };
 use sqlx::Row;
 use sqlx::migrate::Migrator;
@@ -527,6 +529,297 @@ impl MetadataRepository for PostgresMetadataRepository {
     }
 }
 
+#[async_trait]
+impl CoordinatorRepository for PostgresMetadataRepository {
+    async fn register_worker(&self, worker: &WorkerRecord) -> Result<WorkerRecord> {
+        let row = sqlx::query(
+            r#"
+            insert into workers (
+              worker_id,
+              endpoint,
+              availability_zone,
+              max_assignments,
+              labels,
+              status,
+              last_heartbeat_at
+            )
+            values ($1, $2, $3, $4, $5, $6, to_timestamp($7))
+            on conflict (worker_id)
+            do update
+              set endpoint = excluded.endpoint,
+                  availability_zone = excluded.availability_zone,
+                  max_assignments = excluded.max_assignments,
+                  labels = excluded.labels,
+                  status = excluded.status,
+                  last_heartbeat_at = excluded.last_heartbeat_at
+            returning
+              worker_id,
+              endpoint,
+              availability_zone,
+              max_assignments,
+              labels,
+              status,
+              extract(epoch from registered_at)::bigint as registered_at_epoch_secs,
+              extract(epoch from last_heartbeat_at)::bigint as last_heartbeat_at_epoch_secs,
+              (
+                select count(*)
+                from partition_assignments pa
+                where pa.worker_id = workers.worker_id
+              )::bigint as active_assignments
+            "#,
+        )
+        .bind(&worker.worker_id)
+        .bind(&worker.endpoint)
+        .bind(&worker.availability_zone)
+        .bind(i32::from(worker.max_assignments))
+        .bind(Json(&worker.labels))
+        .bind(worker_status_to_db(worker.status))
+        .bind(i64::try_from(worker.last_heartbeat_at_epoch_secs)?)
+        .fetch_one(&self.pool)
+        .await?;
+
+        map_worker_record(row)
+    }
+
+    async fn heartbeat_worker(
+        &self,
+        worker_id: &str,
+        heartbeat_epoch_secs: u64,
+    ) -> Result<Option<WorkerRecord>> {
+        let row = sqlx::query(
+            r#"
+            update workers
+            set last_heartbeat_at = to_timestamp($2),
+                status = case
+                    when status = 'expired' then 'ready'
+                    else status
+                  end
+            where worker_id = $1
+            returning
+              worker_id,
+              endpoint,
+              availability_zone,
+              max_assignments,
+              labels,
+              status,
+              extract(epoch from registered_at)::bigint as registered_at_epoch_secs,
+              extract(epoch from last_heartbeat_at)::bigint as last_heartbeat_at_epoch_secs,
+              (
+                select count(*)
+                from partition_assignments pa
+                where pa.worker_id = workers.worker_id
+              )::bigint as active_assignments
+            "#,
+        )
+        .bind(worker_id)
+        .bind(i64::try_from(heartbeat_epoch_secs)?)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(map_worker_record).transpose()
+    }
+
+    async fn list_workers(&self, status: Option<WorkerStatus>) -> Result<Vec<WorkerRecord>> {
+        let rows = sqlx::query(
+            r#"
+            select
+              w.worker_id,
+              w.endpoint,
+              w.availability_zone,
+              w.max_assignments,
+              w.labels,
+              w.status,
+              extract(epoch from w.registered_at)::bigint as registered_at_epoch_secs,
+              extract(epoch from w.last_heartbeat_at)::bigint as last_heartbeat_at_epoch_secs,
+              count(pa.assignment_id)::bigint as active_assignments
+            from workers w
+            left join partition_assignments pa
+              on pa.worker_id = w.worker_id
+            where ($1::text is null or w.status = $1)
+            group by
+              w.worker_id,
+              w.endpoint,
+              w.availability_zone,
+              w.max_assignments,
+              w.labels,
+              w.status,
+              w.registered_at,
+              w.last_heartbeat_at
+            order by w.worker_id
+            "#,
+        )
+        .bind(status.map(worker_status_to_db))
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(map_worker_record).collect()
+    }
+
+    async fn get_pipeline(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<Option<PipelineSpec>> {
+        let row = sqlx::query(
+            r#"
+            select pv.spec
+            from pipelines p
+            join pipeline_versions pv
+              on pv.tenant_id = p.tenant_id
+             and pv.pipeline_id = p.pipeline_id
+             and pv.version = p.current_version
+            where p.tenant_id = $1 and p.pipeline_id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let Json(pipeline) = row.try_get::<Json<PipelineSpec>, _>("spec")?;
+        Ok(Some(pipeline))
+    }
+
+    async fn list_assignments(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+    ) -> Result<Vec<PartitionAssignment>> {
+        let rows = sqlx::query(
+            r#"
+            select partition_id, worker_id, lease_epoch
+            from partition_assignments
+            where tenant_id = $1 and pipeline_id = $2
+            order by partition_id
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(map_partition_assignment).collect()
+    }
+
+    async fn list_assignments_for_worker(
+        &self,
+        worker_id: &str,
+    ) -> Result<Vec<PartitionAssignment>> {
+        let rows = sqlx::query(
+            r#"
+            select partition_id, worker_id, lease_epoch
+            from partition_assignments
+            where worker_id = $1
+            order by tenant_id, pipeline_id, partition_id
+            "#,
+        )
+        .bind(worker_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(map_partition_assignment).collect()
+    }
+
+    async fn replace_assignments(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        version: u32,
+        lease_epoch: u64,
+        lease_expires_at_epoch_secs: u64,
+        assignments: &[PartitionAssignment],
+    ) -> Result<Vec<PartitionAssignment>> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            delete from partition_assignments
+            where tenant_id = $1 and pipeline_id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .execute(tx.as_mut())
+        .await?;
+
+        for assignment in assignments {
+            sqlx::query(
+                r#"
+                insert into partition_assignments (
+                  assignment_id,
+                  tenant_id,
+                  pipeline_id,
+                  version,
+                  partition_id,
+                  worker_id,
+                  lease_epoch,
+                  lease_expires_at
+                )
+                values ($1, $2, $3, $4, $5, $6, $7, to_timestamp($8))
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(tenant_id)
+            .bind(pipeline_id)
+            .bind(i64::from(version))
+            .bind(i32::try_from(assignment.partition_id)?)
+            .bind(&assignment.worker_id)
+            .bind(i64::try_from(lease_epoch)?)
+            .bind(i64::try_from(lease_expires_at_epoch_secs)?)
+            .execute(tx.as_mut())
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(assignments.to_vec())
+    }
+
+    async fn expire_workers(&self, stale_before_epoch_secs: u64) -> Result<LeaseExpiryOutcome> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            r#"
+            update workers
+            set status = 'expired'
+            where status <> 'expired'
+              and extract(epoch from last_heartbeat_at)::bigint < $1
+            returning worker_id
+            "#,
+        )
+        .bind(i64::try_from(stale_before_epoch_secs)?)
+        .fetch_all(tx.as_mut())
+        .await?;
+
+        let expired_worker_ids = rows
+            .into_iter()
+            .map(|row| row.try_get::<String, _>("worker_id"))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut revoked_assignment_count = 0_u32;
+        for worker_id in &expired_worker_ids {
+            let result = sqlx::query(
+                r#"
+                delete from partition_assignments
+                where worker_id = $1
+                "#,
+            )
+            .bind(worker_id)
+            .execute(tx.as_mut())
+            .await?;
+            revoked_assignment_count += u32::try_from(result.rows_affected()).unwrap_or(u32::MAX);
+        }
+
+        tx.commit().await?;
+
+        Ok(LeaseExpiryOutcome {
+            expired_worker_ids,
+            revoked_assignment_count,
+        })
+    }
+}
+
 fn map_registered_topic(row: sqlx::postgres::PgRow) -> Result<RegisteredTopic> {
     Ok(RegisteredTopic {
         tenant_id: row.try_get("tenant_id")?,
@@ -536,12 +829,40 @@ fn map_registered_topic(row: sqlx::postgres::PgRow) -> Result<RegisteredTopic> {
     })
 }
 
+fn map_partition_assignment(row: sqlx::postgres::PgRow) -> Result<PartitionAssignment> {
+    Ok(PartitionAssignment {
+        partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
+        worker_id: row.try_get("worker_id")?,
+        lease_epoch: u64::try_from(row.try_get::<i64, _>("lease_epoch")?)?,
+    })
+}
+
 fn map_tenant(row: sqlx::postgres::PgRow) -> Result<TenantRecord> {
     Ok(TenantRecord {
         tenant_id: row.try_get("tenant_id")?,
         display_name: row.try_get("display_name")?,
         oidc_realm: row.try_get("oidc_realm")?,
         enabled: row.try_get("enabled")?,
+    })
+}
+
+fn map_worker_record(row: sqlx::postgres::PgRow) -> Result<WorkerRecord> {
+    let Json(labels) = row.try_get::<Json<Vec<String>>, _>("labels")?;
+
+    Ok(WorkerRecord {
+        worker_id: row.try_get("worker_id")?,
+        endpoint: row.try_get("endpoint")?,
+        availability_zone: row.try_get("availability_zone")?,
+        max_assignments: u16::try_from(row.try_get::<i32, _>("max_assignments")?)?,
+        labels,
+        status: worker_status_from_db(&row.try_get::<String, _>("status")?)?,
+        active_assignments: u16::try_from(row.try_get::<i64, _>("active_assignments")?)?,
+        registered_at_epoch_secs: u64::try_from(
+            row.try_get::<i64, _>("registered_at_epoch_secs")?,
+        )?,
+        last_heartbeat_at_epoch_secs: u64::try_from(
+            row.try_get::<i64, _>("last_heartbeat_at_epoch_secs")?,
+        )?,
     })
 }
 
@@ -605,5 +926,22 @@ fn role_from_db(value: &str) -> Result<PlatformRole> {
         "topic_viewer" => Ok(PlatformRole::TopicViewer),
         "replay_operator" => Ok(PlatformRole::ReplayOperator),
         _ => Err(anyhow!("unknown platform role: {value}")),
+    }
+}
+
+fn worker_status_to_db(status: WorkerStatus) -> &'static str {
+    match status {
+        WorkerStatus::Ready => "ready",
+        WorkerStatus::Draining => "draining",
+        WorkerStatus::Expired => "expired",
+    }
+}
+
+fn worker_status_from_db(value: &str) -> Result<WorkerStatus> {
+    match value {
+        "ready" => Ok(WorkerStatus::Ready),
+        "draining" => Ok(WorkerStatus::Draining),
+        "expired" => Ok(WorkerStatus::Expired),
+        _ => Err(anyhow!("unknown worker status: {value}")),
     }
 }

@@ -37,6 +37,14 @@ service RunService {
   rpc ListDeadLetters(ListDeadLettersRequest) returns (ListDeadLettersResponse);
 }
 
+service CoordinatorService {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc HeartbeatWorker(HeartbeatWorkerRequest) returns (HeartbeatWorkerResponse);
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+  rpc RebalancePipeline(RebalancePipelineRequest) returns (RebalancePipelineResponse);
+  rpc ExpireWorkerLeases(ExpireWorkerLeasesRequest) returns (ExpireWorkerLeasesResponse);
+}
+
 message CreatePipelineRequest {
   PipelineSpec pipeline = 1;
 }
@@ -220,6 +228,53 @@ message ListAssignmentsResponse {
   repeated PartitionAssignment assignments = 1;
 }
 
+message RegisterWorkerRequest {
+  WorkerRecord worker = 1;
+}
+
+message RegisterWorkerResponse {
+  WorkerRecord worker = 1;
+  uint32 lease_ttl_secs = 2;
+}
+
+message HeartbeatWorkerRequest {
+  string worker_id = 1;
+}
+
+message HeartbeatWorkerResponse {
+  WorkerRecord worker = 1;
+  uint32 lease_ttl_secs = 2;
+  repeated PartitionAssignment assignments = 3;
+}
+
+message ListWorkersRequest {
+  optional WorkerStatus status = 1;
+}
+
+message ListWorkersResponse {
+  repeated WorkerRecord workers = 1;
+}
+
+message RebalancePipelineRequest {
+  string tenant_id = 1;
+  string pipeline_id = 2;
+}
+
+message RebalancePipelineResponse {
+  uint32 version = 1;
+  uint64 lease_epoch = 2;
+  repeated PartitionAssignment assignments = 3;
+}
+
+message ExpireWorkerLeasesRequest {
+  uint32 stale_after_secs = 1;
+}
+
+message ExpireWorkerLeasesResponse {
+  repeated string expired_worker_ids = 1;
+  uint32 revoked_assignment_count = 2;
+}
+
 message GetCheckpointHistoryRequest {
   string tenant_id = 1;
   string pipeline_id = 2;
@@ -398,6 +453,18 @@ message ServiceAccount {
   bool enabled = 5;
 }
 
+message WorkerRecord {
+  string worker_id = 1;
+  string endpoint = 2;
+  string availability_zone = 3;
+  uint32 max_assignments = 4;
+  repeated string labels = 5;
+  WorkerStatus status = 6;
+  uint32 active_assignments = 7;
+  uint64 registered_at_epoch_secs = 8;
+  uint64 last_heartbeat_at_epoch_secs = 9;
+}
+
 message RoleBinding {
   SubjectKind subject_kind = 1;
   string subject_id = 2;
@@ -509,4 +576,11 @@ enum PlatformRole {
   PLATFORM_ROLE_TOPIC_EDITOR = 5;
   PLATFORM_ROLE_TOPIC_VIEWER = 6;
   PLATFORM_ROLE_REPLAY_OPERATOR = 7;
+}
+
+enum WorkerStatus {
+  WORKER_STATUS_UNSPECIFIED = 0;
+  WORKER_STATUS_READY = 1;
+  WORKER_STATUS_DRAINING = 2;
+  WORKER_STATUS_EXPIRED = 3;
 }
