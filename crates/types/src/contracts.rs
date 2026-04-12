@@ -358,6 +358,9 @@ pub enum RunStatus {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PartitionAssignment {
+    pub tenant_id: String,
+    pub pipeline_id: String,
+    pub version: u32,
     pub partition_id: u32,
     pub worker_id: String,
     pub lease_epoch: u64,

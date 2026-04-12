@@ -481,9 +481,12 @@ message PipelineRunStatus {
 }
 
 message PartitionAssignment {
-  uint32 partition_id = 1;
-  string worker_id = 2;
-  uint64 lease_epoch = 3;
+  string tenant_id = 1;
+  string pipeline_id = 2;
+  uint32 version = 3;
+  uint32 partition_id = 4;
+  string worker_id = 5;
+  uint64 lease_epoch = 6;
 }
 
 message CheckpointSummary {

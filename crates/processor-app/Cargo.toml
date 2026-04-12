@@ -1,5 +1,5 @@
 [package]
-name = "event-pipeline-postgres-store"
+name = "event-pipeline-processor-app"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,10 +9,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-event-pipeline-coordinator-app = { path = "../coordinator-app" }
-event-pipeline-control-plane-app = { path = "../control-plane-app" }
-event-pipeline-processor-app = { path = "../processor-app" }
 event-pipeline-types = { path = "../types" }
 serde_json.workspace = true
-sqlx.workspace = true
-uuid.workspace = true
+tokio.workspace = true
+tracing.workspace = true

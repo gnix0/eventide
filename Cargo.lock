@@ -464,10 +464,23 @@ dependencies = [
  "async-trait",
  "event-pipeline-control-plane-app",
  "event-pipeline-coordinator-app",
+ "event-pipeline-processor-app",
  "event-pipeline-types",
  "serde_json",
  "sqlx",
  "uuid",
+]
+
+[[package]]
+name = "event-pipeline-processor-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "event-pipeline-types",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1236,9 +1249,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "event-pipeline-config",
+ "event-pipeline-postgres-store",
+ "event-pipeline-processor-app",
  "event-pipeline-runtime",
  "event-pipeline-types",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

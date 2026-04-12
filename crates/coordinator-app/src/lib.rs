@@ -233,7 +233,14 @@ impl CoordinatorService {
             .unwrap_or(0)
             + 1;
 
-        let assignments = build_assignments(partition_count, lease_epoch, &mut workers)?;
+        let assignments = build_assignments(
+            &request.tenant_id,
+            &request.pipeline_id,
+            pipeline.version,
+            partition_count,
+            lease_epoch,
+            &mut workers,
+        )?;
         let persisted = self
             .repository
             .replace_assignments(
@@ -320,6 +327,9 @@ fn pipeline_partition_count(pipeline: &PipelineSpec) -> Result<u32> {
 }
 
 fn build_assignments(
+    tenant_id: &str,
+    pipeline_id: &str,
+    version: u32,
     partition_count: u32,
     lease_epoch: u64,
     workers: &mut [WorkerRecord],
@@ -336,6 +346,9 @@ fn build_assignments(
         };
 
         assignments.push(PartitionAssignment {
+            tenant_id: tenant_id.to_owned(),
+            pipeline_id: pipeline_id.to_owned(),
+            version,
             partition_id,
             worker_id: worker.worker_id.clone(),
             lease_epoch,
