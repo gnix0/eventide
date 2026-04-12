@@ -6,6 +6,9 @@ pub struct ServiceRuntimeConfig {
     pub bind_addr: String,
     pub database_url: String,
     pub metrics_addr: String,
+    pub processor_worker_id: String,
+    pub processor_poll_interval_ms: u64,
+    pub processor_batch_size: usize,
     pub worker_lease_ttl_secs: u32,
     pub worker_stale_after_secs: u32,
     pub oidc_audience: String,
@@ -23,6 +26,16 @@ impl ServiceRuntimeConfig {
         });
         let metrics_addr =
             std::env::var("METRICS_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:9090"));
+        let processor_worker_id = std::env::var("PROCESSOR_WORKER_ID")
+            .unwrap_or_else(|_| format!("{}-default", service_name.as_str()));
+        let processor_poll_interval_ms = std::env::var("PROCESSOR_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5_000);
+        let processor_batch_size = std::env::var("PROCESSOR_BATCH_SIZE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(128);
         let worker_lease_ttl_secs = std::env::var("WORKER_LEASE_TTL_SECS")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -46,6 +59,9 @@ impl ServiceRuntimeConfig {
             bind_addr,
             database_url,
             metrics_addr,
+            processor_worker_id,
+            processor_poll_interval_ms,
+            processor_batch_size,
             worker_lease_ttl_secs,
             worker_stale_after_secs,
             oidc_audience,

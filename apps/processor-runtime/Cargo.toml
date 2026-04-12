@@ -9,6 +9,9 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 event-pipeline-config = { path = "../../crates/config" }
+event-pipeline-processor-app = { path = "../../crates/processor-app" }
+event-pipeline-postgres-store = { path = "../../crates/postgres-store" }
 event-pipeline-runtime = { path = "../../crates/runtime" }
 event-pipeline-types = { path = "../../crates/types" }
 tokio.workspace = true
+tracing.workspace = true

@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use event_pipeline_control_plane_app::MetadataRepository;
 use event_pipeline_coordinator_app::{CoordinatorRepository, LeaseExpiryOutcome};
+use event_pipeline_processor_app::{CheckpointWrite, PipelineEvent, ProcessorRepository};
 use event_pipeline_types::{
     DeploymentState, PartitionAssignment, PipelineSpec, PipelineSummary, PlatformRole,
     RegisteredTopic, RoleBinding, ServiceAccount, SubjectKind, TenantRecord, TenantSummary,
@@ -691,7 +692,7 @@ impl CoordinatorRepository for PostgresMetadataRepository {
     ) -> Result<Vec<PartitionAssignment>> {
         let rows = sqlx::query(
             r#"
-            select partition_id, worker_id, lease_epoch
+            select tenant_id, pipeline_id, version, partition_id, worker_id, lease_epoch
             from partition_assignments
             where tenant_id = $1 and pipeline_id = $2
             order by partition_id
@@ -711,7 +712,7 @@ impl CoordinatorRepository for PostgresMetadataRepository {
     ) -> Result<Vec<PartitionAssignment>> {
         let rows = sqlx::query(
             r#"
-            select partition_id, worker_id, lease_epoch
+            select tenant_id, pipeline_id, version, partition_id, worker_id, lease_epoch
             from partition_assignments
             where worker_id = $1
             order by tenant_id, pipeline_id, partition_id
@@ -820,6 +821,162 @@ impl CoordinatorRepository for PostgresMetadataRepository {
     }
 }
 
+#[async_trait]
+impl ProcessorRepository for PostgresMetadataRepository {
+    async fn list_assignments_for_worker(
+        &self,
+        worker_id: &str,
+    ) -> Result<Vec<PartitionAssignment>> {
+        CoordinatorRepository::list_assignments_for_worker(self, worker_id).await
+    }
+
+    async fn get_pipeline_version(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        version: u32,
+    ) -> Result<Option<PipelineSpec>> {
+        let row = sqlx::query(
+            r#"
+            select spec
+            from pipeline_versions
+            where tenant_id = $1 and pipeline_id = $2 and version = $3
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .bind(i64::from(version))
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let Json(pipeline) = row.try_get::<Json<PipelineSpec>, _>("spec")?;
+        Ok(Some(pipeline))
+    }
+
+    async fn latest_checkpoint(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        partition_id: u32,
+    ) -> Result<Option<event_pipeline_types::CheckpointSummary>> {
+        let row = sqlx::query(
+            r#"
+            select partition_id, kafka_offset, snapshot_uri
+            from checkpoints
+            where tenant_id = $1 and pipeline_id = $2 and partition_id = $3
+            order by created_at desc
+            limit 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .bind(i32::try_from(partition_id)?)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(event_pipeline_types::CheckpointSummary {
+                partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
+                offset: u64::try_from(row.try_get::<i64, _>("kafka_offset")?)?,
+                snapshot_uri: row.try_get("snapshot_uri")?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn fetch_partition_events(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        partition_id: u32,
+        offset_gt: u64,
+        limit: usize,
+    ) -> Result<Vec<PipelineEvent>> {
+        let rows = sqlx::query(
+            r#"
+            select
+              tenant_id,
+              pipeline_id,
+              source_id,
+              partition_id,
+              event_offset,
+              record_key,
+              payload,
+              (extract(epoch from event_time) * 1000)::bigint as event_time_epoch_ms
+            from source_events
+            where tenant_id = $1
+              and pipeline_id = $2
+              and partition_id = $3
+              and event_offset > $4
+            order by event_offset
+            limit $5
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .bind(i32::try_from(partition_id)?)
+        .bind(i64::try_from(offset_gt)?)
+        .bind(i64::try_from(limit)?)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                let Json(payload) = row.try_get::<Json<serde_json::Value>, _>("payload")?;
+                Ok(PipelineEvent {
+                    tenant_id: row.try_get("tenant_id")?,
+                    pipeline_id: row.try_get("pipeline_id")?,
+                    source_id: row.try_get("source_id")?,
+                    partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
+                    offset: u64::try_from(row.try_get::<i64, _>("event_offset")?)?,
+                    record_key: row.try_get("record_key")?,
+                    payload,
+                    event_time_epoch_ms: u64::try_from(
+                        row.try_get::<i64, _>("event_time_epoch_ms")?,
+                    )?,
+                })
+            })
+            .collect()
+    }
+
+    async fn append_checkpoint(
+        &self,
+        checkpoint: &CheckpointWrite,
+    ) -> Result<event_pipeline_types::CheckpointSummary> {
+        sqlx::query(
+            r#"
+            insert into checkpoints (
+              checkpoint_id,
+              tenant_id,
+              pipeline_id,
+              partition_id,
+              kafka_offset,
+              snapshot_uri
+            )
+            values ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(&checkpoint.tenant_id)
+        .bind(&checkpoint.pipeline_id)
+        .bind(i32::try_from(checkpoint.partition_id)?)
+        .bind(i64::try_from(checkpoint.offset)?)
+        .bind(&checkpoint.snapshot_uri)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(event_pipeline_types::CheckpointSummary {
+            partition_id: checkpoint.partition_id,
+            offset: checkpoint.offset,
+            snapshot_uri: checkpoint.snapshot_uri.clone(),
+        })
+    }
+}
+
 fn map_registered_topic(row: sqlx::postgres::PgRow) -> Result<RegisteredTopic> {
     Ok(RegisteredTopic {
         tenant_id: row.try_get("tenant_id")?,
@@ -831,6 +988,9 @@ fn map_registered_topic(row: sqlx::postgres::PgRow) -> Result<RegisteredTopic> {
 
 fn map_partition_assignment(row: sqlx::postgres::PgRow) -> Result<PartitionAssignment> {
     Ok(PartitionAssignment {
+        tenant_id: row.try_get("tenant_id")?,
+        pipeline_id: row.try_get("pipeline_id")?,
+        version: u32::try_from(row.try_get::<i64, _>("version")?)?,
         partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
         worker_id: row.try_get("worker_id")?,
         lease_epoch: u64::try_from(row.try_get::<i64, _>("lease_epoch")?)?,
