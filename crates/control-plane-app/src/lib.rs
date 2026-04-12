@@ -4,13 +4,15 @@ use event_pipeline_types::{
     AssignRoleBindingRequest, AssignRoleBindingResponse, AuthenticatedPrincipal,
     CreatePipelineRequest, CreatePipelineResponse, CreateServiceAccountRequest,
     CreateServiceAccountResponse, CreateTenantRequest, CreateTenantResponse, DeploymentState,
-    GetPipelineRequest, GetPipelineResponse, GetTenantRequest, GetTenantResponse, GetTopicRequest,
-    GetTopicResponse, ListPipelinesRequest, ListPipelinesResponse, ListRoleBindingsRequest,
-    ListRoleBindingsResponse, ListServiceAccountsRequest, ListServiceAccountsResponse,
-    ListTenantsRequest, ListTenantsResponse, ListTopicsRequest, ListTopicsResponse, PipelineSpec,
-    PipelineSummary, PlatformRole, RegisterTopicRequest, RegisterTopicResponse, RegisteredTopic,
-    RoleBinding, ServiceAccount, SubjectKind, TenantRecord, TenantSummary, TopicSummary,
-    UpdatePipelineVersionRequest, UpdatePipelineVersionResponse,
+    GetPipelineRequest, GetPipelineResponse, GetReplayJobRequest, GetReplayJobResponse,
+    GetTenantRequest, GetTenantResponse, GetTopicRequest, GetTopicResponse, ListPipelinesRequest,
+    ListPipelinesResponse, ListRoleBindingsRequest, ListRoleBindingsResponse,
+    ListServiceAccountsRequest, ListServiceAccountsResponse, ListTenantsRequest,
+    ListTenantsResponse, ListTopicsRequest, ListTopicsResponse, PipelineSpec, PipelineSummary,
+    PlatformRole, RegisterTopicRequest, RegisterTopicResponse, RegisteredTopic, ReplayJob,
+    ReplayJobStatus, RequestReplayRequest, RequestReplayResponse, RoleBinding, ServiceAccount,
+    SubjectKind, TenantRecord, TenantSummary, TopicSummary, UpdatePipelineVersionRequest,
+    UpdatePipelineVersionResponse,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -32,6 +34,12 @@ pub trait MetadataRepository: Send + Sync {
         tenant_id: Option<&str>,
         deployment_state: Option<DeploymentState>,
     ) -> Result<Vec<PipelineSummary>>;
+    async fn request_replay(&self, replay_job: &ReplayJob) -> Result<ReplayJob>;
+    async fn get_replay_job(
+        &self,
+        tenant_id: &str,
+        replay_job_id: &str,
+    ) -> Result<Option<ReplayJob>>;
     async fn register_topic(&self, topic: &RegisteredTopic) -> Result<RegisteredTopic>;
     async fn get_topic(&self, tenant_id: &str, topic_name: &str)
     -> Result<Option<RegisteredTopic>>;
@@ -104,6 +112,58 @@ impl MetadataService {
             .await?;
 
         Ok(ListPipelinesResponse { pipelines })
+    }
+
+    pub async fn request_replay(
+        &self,
+        request: RequestReplayRequest,
+    ) -> Result<RequestReplayResponse> {
+        if request.tenant_id.trim().is_empty() {
+            bail!("tenant id must not be empty");
+        }
+        if request.pipeline_id.trim().is_empty() {
+            bail!("pipeline id must not be empty");
+        }
+        if request.reason.trim().is_empty() {
+            bail!("replay reason must not be empty");
+        }
+
+        let pipeline = self
+            .repository
+            .get_pipeline(&request.tenant_id, &request.pipeline_id, None)
+            .await?
+            .ok_or_else(|| anyhow!("pipeline not found"))?;
+
+        let replay_job = self
+            .repository
+            .request_replay(&ReplayJob {
+                replay_job_id: Uuid::now_v7().to_string(),
+                tenant_id: request.tenant_id,
+                pipeline_id: request.pipeline_id,
+                version: pipeline.version,
+                from_offset: request.from_offset,
+                to_offset: request.to_offset,
+                reason: request.reason,
+                status: ReplayJobStatus::Pending,
+                claimed_by_worker_id: None,
+                last_processed_offset: None,
+                error_message: None,
+            })
+            .await?;
+
+        Ok(RequestReplayResponse { replay_job })
+    }
+
+    pub async fn get_replay_job(
+        &self,
+        request: GetReplayJobRequest,
+    ) -> Result<GetReplayJobResponse> {
+        let replay_job = self
+            .repository
+            .get_replay_job(&request.tenant_id, &request.replay_job_id)
+            .await?
+            .ok_or_else(|| anyhow!("replay job not found"))?;
+        Ok(GetReplayJobResponse { replay_job })
     }
 
     pub async fn register_topic(
@@ -374,6 +434,7 @@ type RoleBindingKey = (SubjectKind, String, Option<String>, PlatformRole);
 pub struct InMemoryMetadataRepository {
     pipelines: RwLock<BTreeMap<(String, String, u32), PipelineSpec>>,
     current_versions: RwLock<BTreeMap<(String, String), u32>>,
+    replay_jobs: RwLock<BTreeMap<(String, String), ReplayJob>>,
     topics: RwLock<BTreeMap<(String, String), RegisteredTopic>>,
     tenants: RwLock<BTreeMap<String, TenantRecord>>,
     role_bindings: RwLock<BTreeSet<RoleBindingKey>>,
@@ -512,6 +573,30 @@ impl MetadataRepository for InMemoryMetadataRepository {
             ))
         });
         Ok(results)
+    }
+
+    async fn request_replay(&self, replay_job: &ReplayJob) -> Result<ReplayJob> {
+        self.replay_jobs.write().await.insert(
+            (
+                replay_job.tenant_id.clone(),
+                replay_job.replay_job_id.clone(),
+            ),
+            replay_job.clone(),
+        );
+        Ok(replay_job.clone())
+    }
+
+    async fn get_replay_job(
+        &self,
+        tenant_id: &str,
+        replay_job_id: &str,
+    ) -> Result<Option<ReplayJob>> {
+        Ok(self
+            .replay_jobs
+            .read()
+            .await
+            .get(&(tenant_id.to_owned(), replay_job_id.to_owned()))
+            .cloned())
     }
 
     async fn register_topic(&self, topic: &RegisteredTopic) -> Result<RegisteredTopic> {
@@ -669,11 +754,11 @@ mod tests {
     use event_pipeline_types::{
         AggregateFunction, AssignRoleBindingRequest, AuthenticatedPrincipal, CreatePipelineRequest,
         CreateServiceAccountRequest, CreateTenantRequest, DeploymentState, EventEncoding,
-        ListPipelinesRequest, ListRoleBindingsRequest, ListServiceAccountsRequest,
-        ListTenantsRequest, ListTopicsRequest, OperatorKind, OperatorNode, PipelineSpec,
-        PlatformRole, RegisterTopicRequest, RegisteredTopic, RoleBinding, SinkKind, SinkSpec,
-        SourceTopic, SubjectKind, TenantRecord, UpdatePipelineVersionRequest, WindowKind,
-        WindowSpec,
+        GetReplayJobRequest, ListPipelinesRequest, ListRoleBindingsRequest,
+        ListServiceAccountsRequest, ListTenantsRequest, ListTopicsRequest, OperatorKind,
+        OperatorNode, PipelineSpec, PlatformRole, RegisterTopicRequest, RegisteredTopic,
+        RequestReplayRequest, RoleBinding, SinkKind, SinkSpec, SourceTopic, SubjectKind,
+        TenantRecord, UpdatePipelineVersionRequest, WindowKind, WindowSpec,
     };
     use std::sync::Arc;
 
@@ -731,6 +816,43 @@ mod tests {
 
         assert_eq!(response.pipelines.len(), 1);
         assert_eq!(response.pipelines[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn requests_and_reads_replay_jobs() {
+        let service = MetadataService::new(Arc::new(InMemoryMetadataRepository::default()));
+
+        service
+            .create_pipeline(CreatePipelineRequest {
+                pipeline: valid_pipeline(2),
+            })
+            .await
+            .expect("pipeline creation should succeed");
+
+        let replay_job = service
+            .request_replay(RequestReplayRequest {
+                tenant_id: String::from("tenant-acme"),
+                pipeline_id: String::from("orders-throughput"),
+                from_offset: 42,
+                to_offset: Some(64),
+                reason: String::from("backfill accepted orders"),
+            })
+            .await
+            .expect("replay request should succeed")
+            .replay_job;
+
+        let fetched = service
+            .get_replay_job(GetReplayJobRequest {
+                tenant_id: String::from("tenant-acme"),
+                replay_job_id: replay_job.replay_job_id.clone(),
+            })
+            .await
+            .expect("replay lookup should succeed")
+            .replay_job;
+
+        assert_eq!(fetched.version, 2);
+        assert_eq!(fetched.from_offset, 42);
+        assert_eq!(fetched.to_offset, Some(64));
     }
 
     #[tokio::test]
