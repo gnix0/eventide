@@ -2,11 +2,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use event_pipeline_control_plane_app::MetadataRepository;
 use event_pipeline_coordinator_app::{CoordinatorRepository, LeaseExpiryOutcome};
-use event_pipeline_processor_app::{CheckpointWrite, PipelineEvent, ProcessorRepository};
+use event_pipeline_processor_app::{
+    CheckpointWrite, DeadLetterWrite, LoadedCheckpoint, PipelineEvent, ProcessorRepository,
+};
 use event_pipeline_types::{
-    DeploymentState, PartitionAssignment, PipelineSpec, PipelineSummary, PlatformRole,
-    RegisteredTopic, RoleBinding, ServiceAccount, SubjectKind, TenantRecord, TenantSummary,
-    TopicSummary, WorkerRecord, WorkerStatus,
+    DeadLetterRecord, DeploymentState, PartitionAssignment, PipelineSpec, PipelineSummary,
+    PlatformRole, RegisteredTopic, ReplayJob, ReplayJobStatus, RoleBinding, ServiceAccount,
+    SubjectKind, TenantRecord, TenantSummary, TopicSummary, WorkerRecord, WorkerStatus,
 };
 use sqlx::Row;
 use sqlx::migrate::Migrator;
@@ -284,6 +286,78 @@ impl MetadataRepository for PostgresMetadataRepository {
                 })
             })
             .collect()
+    }
+
+    async fn request_replay(&self, replay_job: &ReplayJob) -> Result<ReplayJob> {
+        sqlx::query(
+            r#"
+            insert into replay_jobs (
+              replay_job_id,
+              tenant_id,
+              pipeline_id,
+              version,
+              from_offset,
+              to_offset,
+              reason,
+              status,
+              claimed_by_worker_id,
+              last_processed_offset,
+              error_message
+            )
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(Uuid::parse_str(&replay_job.replay_job_id)?)
+        .bind(&replay_job.tenant_id)
+        .bind(&replay_job.pipeline_id)
+        .bind(i64::from(replay_job.version))
+        .bind(i64::try_from(replay_job.from_offset)?)
+        .bind(replay_job.to_offset.map(i64::try_from).transpose()?)
+        .bind(&replay_job.reason)
+        .bind(replay_job_status_to_db(replay_job.status))
+        .bind(&replay_job.claimed_by_worker_id)
+        .bind(
+            replay_job
+                .last_processed_offset
+                .map(i64::try_from)
+                .transpose()?,
+        )
+        .bind(&replay_job.error_message)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(replay_job.clone())
+    }
+
+    async fn get_replay_job(
+        &self,
+        tenant_id: &str,
+        replay_job_id: &str,
+    ) -> Result<Option<ReplayJob>> {
+        let row = sqlx::query(
+            r#"
+            select
+              replay_job_id,
+              tenant_id,
+              pipeline_id,
+              version,
+              from_offset,
+              to_offset,
+              reason,
+              status,
+              claimed_by_worker_id,
+              last_processed_offset,
+              error_message
+            from replay_jobs
+            where tenant_id = $1 and replay_job_id = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(Uuid::parse_str(replay_job_id)?)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(map_replay_job).transpose()
     }
 
     async fn register_topic(&self, topic: &RegisteredTopic) -> Result<RegisteredTopic> {
@@ -862,10 +936,10 @@ impl ProcessorRepository for PostgresMetadataRepository {
         tenant_id: &str,
         pipeline_id: &str,
         partition_id: u32,
-    ) -> Result<Option<event_pipeline_types::CheckpointSummary>> {
+    ) -> Result<Option<LoadedCheckpoint>> {
         let row = sqlx::query(
             r#"
-            select partition_id, kafka_offset, snapshot_uri
+            select partition_id, kafka_offset, snapshot_uri, snapshot_version, snapshot_state
             from checkpoints
             where tenant_id = $1 and pipeline_id = $2 and partition_id = $3
             order by created_at desc
@@ -879,10 +953,16 @@ impl ProcessorRepository for PostgresMetadataRepository {
         .await?;
 
         row.map(|row| {
-            Ok(event_pipeline_types::CheckpointSummary {
-                partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
-                offset: u64::try_from(row.try_get::<i64, _>("kafka_offset")?)?,
-                snapshot_uri: row.try_get("snapshot_uri")?,
+            let Json(snapshot_state) =
+                row.try_get::<Json<serde_json::Value>, _>("snapshot_state")?;
+            Ok(LoadedCheckpoint {
+                summary: event_pipeline_types::CheckpointSummary {
+                    partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
+                    offset: u64::try_from(row.try_get::<i64, _>("kafka_offset")?)?,
+                    snapshot_uri: row.try_get("snapshot_uri")?,
+                    snapshot_version: u32::try_from(row.try_get::<i64, _>("snapshot_version")?)?,
+                },
+                snapshot_state,
             })
         })
         .transpose()
@@ -943,10 +1023,7 @@ impl ProcessorRepository for PostgresMetadataRepository {
             .collect()
     }
 
-    async fn append_checkpoint(
-        &self,
-        checkpoint: &CheckpointWrite,
-    ) -> Result<event_pipeline_types::CheckpointSummary> {
+    async fn append_checkpoint(&self, checkpoint: &CheckpointWrite) -> Result<LoadedCheckpoint> {
         sqlx::query(
             r#"
             insert into checkpoints (
@@ -955,9 +1032,11 @@ impl ProcessorRepository for PostgresMetadataRepository {
               pipeline_id,
               partition_id,
               kafka_offset,
-              snapshot_uri
+              snapshot_uri,
+              snapshot_version,
+              snapshot_state
             )
-            values ($1, $2, $3, $4, $5, $6)
+            values ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
         .bind(Uuid::now_v7())
@@ -966,13 +1045,218 @@ impl ProcessorRepository for PostgresMetadataRepository {
         .bind(i32::try_from(checkpoint.partition_id)?)
         .bind(i64::try_from(checkpoint.offset)?)
         .bind(&checkpoint.snapshot_uri)
+        .bind(i64::from(checkpoint.snapshot_version))
+        .bind(Json(&checkpoint.snapshot_state))
         .execute(&self.pool)
         .await?;
 
-        Ok(event_pipeline_types::CheckpointSummary {
-            partition_id: checkpoint.partition_id,
-            offset: checkpoint.offset,
-            snapshot_uri: checkpoint.snapshot_uri.clone(),
+        Ok(LoadedCheckpoint {
+            summary: event_pipeline_types::CheckpointSummary {
+                partition_id: checkpoint.partition_id,
+                offset: checkpoint.offset,
+                snapshot_uri: checkpoint.snapshot_uri.clone(),
+                snapshot_version: checkpoint.snapshot_version,
+            },
+            snapshot_state: checkpoint.snapshot_state.clone(),
+        })
+    }
+
+    async fn claim_pending_replay_job(&self, worker_id: &str) -> Result<Option<ReplayJob>> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            select replay_job_id
+            from replay_jobs
+            where status = 'pending'
+            order by created_at
+            limit 1
+            for update skip locked
+            "#,
+        )
+        .fetch_optional(tx.as_mut())
+        .await?;
+
+        let Some(row) = row else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+
+        let replay_job_id = row.try_get::<Uuid, _>("replay_job_id")?;
+        let row = sqlx::query(
+            r#"
+            update replay_jobs
+            set status = 'running',
+                claimed_by_worker_id = $2,
+                updated_at = now()
+            where replay_job_id = $1
+            returning replay_job_id, tenant_id, pipeline_id, version, from_offset, to_offset, reason, status,
+                      claimed_by_worker_id, last_processed_offset, error_message
+            "#,
+        )
+        .bind(replay_job_id)
+        .bind(worker_id)
+        .fetch_one(tx.as_mut())
+        .await?;
+
+        tx.commit().await?;
+        map_replay_job(row).map(Some)
+    }
+
+    async fn fetch_replay_events(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        from_offset: u64,
+        to_offset: Option<u64>,
+        last_processed_offset: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PipelineEvent>> {
+        let lower_bound = last_processed_offset.unwrap_or(from_offset.saturating_sub(1));
+        let rows = sqlx::query(
+            r#"
+            select
+              tenant_id,
+              pipeline_id,
+              source_id,
+              partition_id,
+              event_offset,
+              record_key,
+              payload,
+              (extract(epoch from event_time) * 1000)::bigint as event_time_epoch_ms
+            from source_events
+            where tenant_id = $1
+              and pipeline_id = $2
+              and event_offset > $3
+              and event_offset >= $4
+              and ($5::bigint is null or event_offset <= $5)
+            order by partition_id, event_offset
+            limit $6
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .bind(i64::try_from(lower_bound)?)
+        .bind(i64::try_from(from_offset)?)
+        .bind(to_offset.map(i64::try_from).transpose()?)
+        .bind(i64::try_from(limit)?)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(map_pipeline_event).collect()
+    }
+
+    async fn update_replay_job_progress(
+        &self,
+        replay_job_id: &str,
+        last_processed_offset: u64,
+    ) -> Result<ReplayJob> {
+        let row = sqlx::query(
+            r#"
+            update replay_jobs
+            set last_processed_offset = $2,
+                updated_at = now()
+            where replay_job_id = $1
+            returning replay_job_id, tenant_id, pipeline_id, version, from_offset, to_offset, reason, status,
+                      claimed_by_worker_id, last_processed_offset, error_message
+            "#,
+        )
+        .bind(Uuid::parse_str(replay_job_id)?)
+        .bind(i64::try_from(last_processed_offset)?)
+        .fetch_one(&self.pool)
+        .await?;
+
+        map_replay_job(row)
+    }
+
+    async fn complete_replay_job(
+        &self,
+        replay_job_id: &str,
+        last_processed_offset: Option<u64>,
+    ) -> Result<ReplayJob> {
+        let row = sqlx::query(
+            r#"
+            update replay_jobs
+            set status = 'succeeded',
+                last_processed_offset = coalesce($2, last_processed_offset),
+                updated_at = now()
+            where replay_job_id = $1
+            returning replay_job_id, tenant_id, pipeline_id, version, from_offset, to_offset, reason, status,
+                      claimed_by_worker_id, last_processed_offset, error_message
+            "#,
+        )
+        .bind(Uuid::parse_str(replay_job_id)?)
+        .bind(last_processed_offset.map(i64::try_from).transpose()?)
+        .fetch_one(&self.pool)
+        .await?;
+
+        map_replay_job(row)
+    }
+
+    async fn fail_replay_job(
+        &self,
+        replay_job_id: &str,
+        error_message: &str,
+        last_processed_offset: Option<u64>,
+    ) -> Result<ReplayJob> {
+        let row = sqlx::query(
+            r#"
+            update replay_jobs
+            set status = 'failed',
+                error_message = $2,
+                last_processed_offset = coalesce($3, last_processed_offset),
+                updated_at = now()
+            where replay_job_id = $1
+            returning replay_job_id, tenant_id, pipeline_id, version, from_offset, to_offset, reason, status,
+                      claimed_by_worker_id, last_processed_offset, error_message
+            "#,
+        )
+        .bind(Uuid::parse_str(replay_job_id)?)
+        .bind(error_message)
+        .bind(last_processed_offset.map(i64::try_from).transpose()?)
+        .fetch_one(&self.pool)
+        .await?;
+
+        map_replay_job(row)
+    }
+
+    async fn append_dead_letter(&self, dead_letter: &DeadLetterWrite) -> Result<DeadLetterRecord> {
+        sqlx::query(
+            r#"
+            insert into dead_letters (
+              dead_letter_id,
+              tenant_id,
+              pipeline_id,
+              source_id,
+              partition_id,
+              event_offset,
+              record_key,
+              failure_reason,
+              retryable,
+              payload
+            )
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(&dead_letter.tenant_id)
+        .bind(&dead_letter.pipeline_id)
+        .bind(&dead_letter.source_id)
+        .bind(i32::try_from(dead_letter.partition_id)?)
+        .bind(i64::try_from(dead_letter.event_offset)?)
+        .bind(&dead_letter.record_key)
+        .bind(&dead_letter.failure_reason)
+        .bind(dead_letter.retryable)
+        .bind(Json(&dead_letter.payload))
+        .execute(&self.pool)
+        .await?;
+
+        Ok(DeadLetterRecord {
+            source_id: dead_letter.source_id.clone(),
+            partition_id: dead_letter.partition_id,
+            event_offset: dead_letter.event_offset,
+            record_key: dead_letter.record_key.clone(),
+            failure_reason: dead_letter.failure_reason.clone(),
+            retryable: dead_letter.retryable,
         })
     }
 }
@@ -983,6 +1267,42 @@ fn map_registered_topic(row: sqlx::postgres::PgRow) -> Result<RegisteredTopic> {
         topic_name: row.try_get("topic_name")?,
         partition_count: u16::try_from(row.try_get::<i32, _>("partition_count")?)?,
         retention_hours: u32::try_from(row.try_get::<i32, _>("retention_hours")?)?,
+    })
+}
+
+fn map_pipeline_event(row: sqlx::postgres::PgRow) -> Result<PipelineEvent> {
+    let Json(payload) = row.try_get::<Json<serde_json::Value>, _>("payload")?;
+    Ok(PipelineEvent {
+        tenant_id: row.try_get("tenant_id")?,
+        pipeline_id: row.try_get("pipeline_id")?,
+        source_id: row.try_get("source_id")?,
+        partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
+        offset: u64::try_from(row.try_get::<i64, _>("event_offset")?)?,
+        record_key: row.try_get("record_key")?,
+        payload,
+        event_time_epoch_ms: u64::try_from(row.try_get::<i64, _>("event_time_epoch_ms")?)?,
+    })
+}
+
+fn map_replay_job(row: sqlx::postgres::PgRow) -> Result<ReplayJob> {
+    Ok(ReplayJob {
+        replay_job_id: row.try_get::<Uuid, _>("replay_job_id")?.to_string(),
+        tenant_id: row.try_get("tenant_id")?,
+        pipeline_id: row.try_get("pipeline_id")?,
+        version: u32::try_from(row.try_get::<i64, _>("version")?)?,
+        from_offset: u64::try_from(row.try_get::<i64, _>("from_offset")?)?,
+        to_offset: row
+            .try_get::<Option<i64>, _>("to_offset")?
+            .map(u64::try_from)
+            .transpose()?,
+        reason: row.try_get("reason")?,
+        status: replay_job_status_from_db(&row.try_get::<String, _>("status")?)?,
+        claimed_by_worker_id: row.try_get("claimed_by_worker_id")?,
+        last_processed_offset: row
+            .try_get::<Option<i64>, _>("last_processed_offset")?
+            .map(u64::try_from)
+            .transpose()?,
+        error_message: row.try_get("error_message")?,
     })
 }
 
@@ -1046,6 +1366,25 @@ fn deployment_state_from_db(value: &str) -> Result<DeploymentState> {
         "paused" => Ok(DeploymentState::Paused),
         "failed" => Ok(DeploymentState::Failed),
         _ => Err(anyhow!("unknown deployment state: {value}")),
+    }
+}
+
+fn replay_job_status_to_db(status: ReplayJobStatus) -> &'static str {
+    match status {
+        ReplayJobStatus::Pending => "pending",
+        ReplayJobStatus::Running => "running",
+        ReplayJobStatus::Succeeded => "succeeded",
+        ReplayJobStatus::Failed => "failed",
+    }
+}
+
+fn replay_job_status_from_db(value: &str) -> Result<ReplayJobStatus> {
+    match value {
+        "pending" => Ok(ReplayJobStatus::Pending),
+        "running" => Ok(ReplayJobStatus::Running),
+        "succeeded" => Ok(ReplayJobStatus::Succeeded),
+        "failed" => Ok(ReplayJobStatus::Failed),
+        other => bail!("unsupported replay job status {other}"),
     }
 }
 

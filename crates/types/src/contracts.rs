@@ -371,10 +371,14 @@ pub struct CheckpointSummary {
     pub partition_id: u32,
     pub offset: u64,
     pub snapshot_uri: String,
+    pub snapshot_version: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeadLetterRecord {
+    pub source_id: String,
+    pub partition_id: u32,
+    pub event_offset: u64,
     pub record_key: String,
     pub failure_reason: String,
     pub retryable: bool,
@@ -385,7 +389,14 @@ pub struct ReplayJob {
     pub replay_job_id: String,
     pub tenant_id: String,
     pub pipeline_id: String,
+    pub version: u32,
+    pub from_offset: u64,
+    pub to_offset: Option<u64>,
+    pub reason: String,
     pub status: ReplayJobStatus,
+    pub claimed_by_worker_id: Option<String>,
+    pub last_processed_offset: Option<u64>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

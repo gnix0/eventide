@@ -1,9 +1,10 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use event_pipeline_types::{
-    AggregateFunction, CheckpointSummary, DeploymentState, JoinKind, OperatorKind,
-    PartitionAssignment, PipelineSpec, SinkKind, WindowKind,
+    AggregateFunction, CheckpointSummary, DeadLetterRecord, DeploymentState, JoinKind,
+    OperatorKind, PartitionAssignment, PipelineSpec, ReplayJob, SinkKind, WindowKind,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -45,13 +46,34 @@ pub struct SinkEmission {
     pub destination: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadedCheckpoint {
+    pub summary: CheckpointSummary,
+    pub snapshot_state: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CheckpointWrite {
     pub tenant_id: String,
     pub pipeline_id: String,
     pub partition_id: u32,
     pub offset: u64,
     pub snapshot_uri: String,
+    pub snapshot_version: u32,
+    pub snapshot_state: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeadLetterWrite {
+    pub tenant_id: String,
+    pub pipeline_id: String,
+    pub source_id: String,
+    pub partition_id: u32,
+    pub event_offset: u64,
+    pub record_key: String,
+    pub failure_reason: String,
+    pub retryable: bool,
+    pub payload: Value,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -61,6 +83,15 @@ pub struct ProcessedAssignment {
     pub start_offset: u64,
     pub checkpoint: Option<CheckpointSummary>,
     pub sink_emissions: Vec<SinkEmission>,
+    pub dead_letter_count: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessedReplayJob {
+    pub replay_job: ReplayJob,
+    pub processed_event_count: usize,
+    pub sink_emissions: Vec<SinkEmission>,
+    pub dead_letter_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -72,6 +103,7 @@ pub struct AssignmentFailure {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PollProcessorResponse {
     pub processed_assignments: Vec<ProcessedAssignment>,
+    pub processed_replay_jobs: Vec<ProcessedReplayJob>,
     pub failed_assignments: Vec<AssignmentFailure>,
 }
 
@@ -92,7 +124,7 @@ pub trait ProcessorRepository: Send + Sync {
         tenant_id: &str,
         pipeline_id: &str,
         partition_id: u32,
-    ) -> Result<Option<CheckpointSummary>>;
+    ) -> Result<Option<LoadedCheckpoint>>;
     async fn fetch_partition_events(
         &self,
         tenant_id: &str,
@@ -101,7 +133,34 @@ pub trait ProcessorRepository: Send + Sync {
         offset_gt: u64,
         limit: usize,
     ) -> Result<Vec<PipelineEvent>>;
-    async fn append_checkpoint(&self, checkpoint: &CheckpointWrite) -> Result<CheckpointSummary>;
+    async fn append_checkpoint(&self, checkpoint: &CheckpointWrite) -> Result<LoadedCheckpoint>;
+    async fn claim_pending_replay_job(&self, worker_id: &str) -> Result<Option<ReplayJob>>;
+    async fn fetch_replay_events(
+        &self,
+        tenant_id: &str,
+        pipeline_id: &str,
+        from_offset: u64,
+        to_offset: Option<u64>,
+        last_processed_offset: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<PipelineEvent>>;
+    async fn update_replay_job_progress(
+        &self,
+        replay_job_id: &str,
+        last_processed_offset: u64,
+    ) -> Result<ReplayJob>;
+    async fn complete_replay_job(
+        &self,
+        replay_job_id: &str,
+        last_processed_offset: Option<u64>,
+    ) -> Result<ReplayJob>;
+    async fn fail_replay_job(
+        &self,
+        replay_job_id: &str,
+        error_message: &str,
+        last_processed_offset: Option<u64>,
+    ) -> Result<ReplayJob>;
+    async fn append_dead_letter(&self, dead_letter: &DeadLetterWrite) -> Result<DeadLetterRecord>;
 }
 
 #[derive(Clone)]
@@ -138,6 +197,22 @@ impl ProcessorService {
             }
         }
 
+        if let Some(replay_job) = self
+            .repository
+            .claim_pending_replay_job(&self.settings.worker_id)
+            .await?
+        {
+            match self.process_replay_job(replay_job.clone()).await {
+                Ok(processed) => response.processed_replay_jobs.push(processed),
+                Err(error) => {
+                    let _ = self
+                        .repository
+                        .fail_replay_job(&replay_job.replay_job_id, &error.to_string(), None)
+                        .await;
+                }
+            }
+        }
+
         Ok(response)
     }
 
@@ -167,7 +242,10 @@ impl ProcessorService {
             .await?;
         let start_offset = latest_checkpoint
             .as_ref()
-            .map_or(0, |checkpoint| checkpoint.offset);
+            .map_or(0, |checkpoint| checkpoint.summary.offset);
+
+        self.restore_live_state_if_missing(&assignment, latest_checkpoint.as_ref())
+            .await?;
 
         let events = self
             .repository
@@ -185,13 +263,20 @@ impl ProcessorService {
                 assignment,
                 processed_event_count: 0,
                 start_offset,
-                checkpoint: latest_checkpoint,
+                checkpoint: latest_checkpoint.map(|checkpoint| checkpoint.summary),
                 sink_emissions: Vec::new(),
+                dead_letter_count: 0,
             });
         }
 
-        let sink_emissions = self.execute_events(&assignment, &pipeline, &events).await?;
+        let key = AssignmentKey::from_assignment(&assignment);
+        let execution = {
+            let mut states = self.state.write().await;
+            let state = states.entry(key).or_default();
+            self.execute_events(&assignment, &pipeline, &events, state)?
+        };
 
+        let snapshot_state = self.snapshot_assignment_state(&assignment).await?;
         let last_offset = events.last().map_or(start_offset, |event| event.offset);
         let checkpoint = self
             .repository
@@ -207,82 +292,269 @@ impl ProcessorService {
                     assignment.partition_id,
                     last_offset
                 ),
+                snapshot_version: 1,
+                snapshot_state,
             })
             .await?;
+
+        self.persist_dead_letters(&execution.dead_letters).await?;
 
         Ok(ProcessedAssignment {
             assignment,
             processed_event_count: events.len(),
             start_offset,
-            checkpoint: Some(checkpoint),
-            sink_emissions,
+            checkpoint: Some(checkpoint.summary),
+            sink_emissions: execution.sink_emissions,
+            dead_letter_count: execution.dead_letters.len(),
         })
     }
 
-    async fn execute_events(
+    async fn process_replay_job(&self, replay_job: ReplayJob) -> Result<ProcessedReplayJob> {
+        let pipeline = self
+            .repository
+            .get_pipeline_version(
+                &replay_job.tenant_id,
+                &replay_job.pipeline_id,
+                replay_job.version,
+            )
+            .await?
+            .ok_or_else(|| anyhow!("pipeline version not found for replay job"))?;
+
+        validate_runtime_supported(&pipeline)?;
+
+        let events = self
+            .repository
+            .fetch_replay_events(
+                &replay_job.tenant_id,
+                &replay_job.pipeline_id,
+                replay_job.from_offset,
+                replay_job.to_offset,
+                replay_job.last_processed_offset,
+                self.settings.batch_size,
+            )
+            .await?;
+
+        if events.is_empty() {
+            let replay_job = self
+                .repository
+                .complete_replay_job(&replay_job.replay_job_id, replay_job.last_processed_offset)
+                .await?;
+            return Ok(ProcessedReplayJob {
+                replay_job,
+                processed_event_count: 0,
+                sink_emissions: Vec::new(),
+                dead_letter_count: 0,
+            });
+        }
+
+        let mut replay_state = BTreeMap::new();
+        let mut sink_emissions = Vec::new();
+        let mut dead_letters = Vec::new();
+
+        let grouped = group_events_by_partition(&events);
+        for (partition_id, partition_events) in grouped {
+            let assignment = PartitionAssignment {
+                tenant_id: replay_job.tenant_id.clone(),
+                pipeline_id: replay_job.pipeline_id.clone(),
+                version: replay_job.version,
+                partition_id,
+                worker_id: self.settings.worker_id.clone(),
+                lease_epoch: 0,
+            };
+            let state = replay_state
+                .entry(AssignmentKey::from_assignment(&assignment))
+                .or_default();
+            let execution =
+                self.execute_events(&assignment, &pipeline, &partition_events, state)?;
+            sink_emissions.extend(execution.sink_emissions);
+            dead_letters.extend(execution.dead_letters);
+        }
+
+        self.persist_dead_letters(&dead_letters).await?;
+
+        let last_processed_offset = events.last().map(|event| event.offset);
+        let replay_job = self
+            .repository
+            .update_replay_job_progress(
+                &replay_job.replay_job_id,
+                last_processed_offset.unwrap_or(replay_job.from_offset),
+            )
+            .await?;
+
+        let replay_job = if events.len() < self.settings.batch_size {
+            self.repository
+                .complete_replay_job(&replay_job.replay_job_id, last_processed_offset)
+                .await?
+        } else {
+            replay_job
+        };
+
+        Ok(ProcessedReplayJob {
+            replay_job,
+            processed_event_count: events.len(),
+            sink_emissions,
+            dead_letter_count: dead_letters.len(),
+        })
+    }
+
+    async fn restore_live_state_if_missing(
+        &self,
+        assignment: &PartitionAssignment,
+        checkpoint: Option<&LoadedCheckpoint>,
+    ) -> Result<()> {
+        let key = AssignmentKey::from_assignment(assignment);
+        let mut states = self.state.write().await;
+        if states.contains_key(&key) {
+            return Ok(());
+        }
+
+        let restored = checkpoint
+            .map(|checkpoint| deserialize_state(&checkpoint.snapshot_state))
+            .transpose()?
+            .unwrap_or_default();
+        states.insert(key, restored);
+        Ok(())
+    }
+
+    async fn snapshot_assignment_state(&self, assignment: &PartitionAssignment) -> Result<Value> {
+        let states = self.state.read().await;
+        let state = states
+            .get(&AssignmentKey::from_assignment(assignment))
+            .cloned()
+            .unwrap_or_default();
+        serde_json::to_value(state).map_err(Into::into)
+    }
+
+    async fn persist_dead_letters(&self, dead_letters: &[DeadLetterWrite]) -> Result<()> {
+        for dead_letter in dead_letters {
+            self.repository.append_dead_letter(dead_letter).await?;
+        }
+        Ok(())
+    }
+
+    fn execute_events(
         &self,
         assignment: &PartitionAssignment,
         pipeline: &PipelineSpec,
         events: &[PipelineEvent],
-    ) -> Result<Vec<SinkEmission>> {
-        let mut emissions = Vec::new();
-        for event in events {
-            let mut values = BTreeMap::new();
-            values.insert(event.source_id.clone(), vec![event.payload.clone()]);
+        state: &mut AssignmentState,
+    ) -> Result<ExecutionOutcome> {
+        let mut sink_emissions = Vec::new();
+        let mut dead_letters = Vec::new();
 
-            for operator in &pipeline.operators {
-                if operator
-                    .upstream_ids
-                    .iter()
-                    .all(|upstream_id| values.contains_key(upstream_id))
-                {
+        for event in events {
+            match self.execute_event(assignment, pipeline, event, state) {
+                Ok(mut emissions) => sink_emissions.append(&mut emissions),
+                Err(error) => dead_letters.push(DeadLetterWrite {
+                    tenant_id: assignment.tenant_id.clone(),
+                    pipeline_id: assignment.pipeline_id.clone(),
+                    source_id: event.source_id.clone(),
+                    partition_id: event.partition_id,
+                    event_offset: event.offset,
+                    record_key: event.record_key.clone(),
+                    failure_reason: error.to_string(),
+                    retryable: false,
+                    payload: event.payload.clone(),
+                }),
+            }
+        }
+
+        Ok(ExecutionOutcome {
+            sink_emissions,
+            dead_letters,
+        })
+    }
+
+    fn execute_event(
+        &self,
+        assignment: &PartitionAssignment,
+        pipeline: &PipelineSpec,
+        event: &PipelineEvent,
+        state: &mut AssignmentState,
+    ) -> Result<Vec<SinkEmission>> {
+        let mut values = BTreeMap::new();
+        values.insert(event.source_id.clone(), vec![event.payload.clone()]);
+
+        for operator in &pipeline.operators {
+            let output = match &operator.kind {
+                OperatorKind::Join {
+                    kind,
+                    key_field,
+                    within_secs,
+                } => {
+                    let Some((active_upstream_id, active_values)) =
+                        operator_active_upstream(operator, &values)
+                    else {
+                        continue;
+                    };
+                    self.apply_join(
+                        state,
+                        operator.operator_id.as_str(),
+                        operator,
+                        *kind,
+                        key_field,
+                        *within_secs,
+                        active_upstream_id,
+                        &active_values,
+                        event,
+                    )?
+                }
+                kind => {
+                    if !operator
+                        .upstream_ids
+                        .iter()
+                        .all(|upstream_id| values.contains_key(upstream_id))
+                    {
+                        continue;
+                    }
+
                     let upstream_values = operator
                         .upstream_ids
                         .iter()
-                        .filter_map(|upstream_id| values.get(upstream_id))
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if upstream_values.iter().any(Vec::is_empty) {
-                        values.insert(operator.operator_id.clone(), Vec::new());
-                        continue;
-                    }
-                    let output = self
-                        .apply_operator(
-                            assignment,
-                            operator.operator_id.as_str(),
-                            &operator.kind,
-                            &upstream_values,
-                            event,
-                        )
-                        .await?;
-                    values.insert(operator.operator_id.clone(), output);
-                }
-            }
+                        .map(|upstream_id| {
+                            values
+                                .get(upstream_id)
+                                .cloned()
+                                .ok_or_else(|| anyhow!("missing upstream value for {upstream_id}"))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
 
-            for sink in &pipeline.sinks {
-                let Some(records) = values.get(&sink.upstream_id) else {
-                    continue;
-                };
-
-                let destination = sink_destination(&sink.kind);
-                for payload in records {
-                    emissions.push(SinkEmission {
-                        sink_id: sink.sink_id.clone(),
-                        partition_id: assignment.partition_id,
-                        offset: event.offset,
-                        payload: payload.clone(),
-                        destination: destination.clone(),
-                    });
+                    self.apply_operator(
+                        state,
+                        operator.operator_id.as_str(),
+                        kind,
+                        &upstream_values,
+                        event,
+                    )?
                 }
+            };
+            values.insert(operator.operator_id.clone(), output);
+        }
+
+        let mut emissions = Vec::new();
+        for sink in &pipeline.sinks {
+            let Some(records) = values.get(&sink.upstream_id) else {
+                continue;
+            };
+
+            let destination = sink_destination(&sink.kind);
+            for payload in records {
+                emissions.push(SinkEmission {
+                    sink_id: sink.sink_id.clone(),
+                    partition_id: assignment.partition_id,
+                    offset: event.offset,
+                    payload: payload.clone(),
+                    destination: destination.clone(),
+                });
             }
         }
 
         Ok(emissions)
     }
 
-    async fn apply_operator(
+    fn apply_operator(
         &self,
-        assignment: &PartitionAssignment,
+        state: &mut AssignmentState,
         operator_id: &str,
         kind: &OperatorKind,
         upstream_values: &[Vec<Value>],
@@ -315,15 +587,14 @@ impl ProcessorService {
             }
             OperatorKind::Aggregate { function, .. } => {
                 let value = single_input_value(upstream_values, "aggregate")?;
-                Ok(vec![
-                    self.update_aggregate_state(assignment, operator_id, *function, value)
-                        .await?,
-                ])
+                Ok(vec![update_aggregate_state(
+                    state,
+                    operator_id,
+                    *function,
+                    value,
+                )?])
             }
-            OperatorKind::Join {
-                kind: JoinKind::Inner | JoinKind::Left,
-                ..
-            } => bail!("join operators are deferred to the stateful-processing branch"),
+            OperatorKind::Join { .. } => unreachable!("join handled separately"),
             OperatorKind::Enrich {
                 table_name,
                 key_field,
@@ -334,23 +605,112 @@ impl ProcessorService {
         }
     }
 
-    async fn update_aggregate_state(
+    #[allow(clippy::too_many_arguments)]
+    fn apply_join(
         &self,
-        assignment: &PartitionAssignment,
+        state: &mut AssignmentState,
         operator_id: &str,
-        function: AggregateFunction,
-        value: &Value,
-    ) -> Result<Value> {
-        let mut state = self.state.write().await;
-        let entry = state
-            .entry(AssignmentKey::from_assignment(assignment))
-            .or_default();
-        let aggregate = entry
-            .aggregates
-            .entry(operator_id.to_owned())
-            .or_insert_with(|| AggregateState::new(function));
+        operator: &event_pipeline_types::OperatorNode,
+        join_kind: JoinKind,
+        key_field: &str,
+        within_secs: u32,
+        active_upstream_id: &str,
+        active_values: &[Value],
+        event: &PipelineEvent,
+    ) -> Result<Vec<Value>> {
+        let [left_upstream_id, right_upstream_id] = operator.upstream_ids.as_slice() else {
+            bail!("join operators require exactly two upstreams");
+        };
 
-        aggregate.update(function, value)
+        let join_state = state.joins.entry(operator_id.to_owned()).or_default();
+        prune_join_state(join_state, event.event_time_epoch_ms, within_secs);
+
+        let active_side = if active_upstream_id == left_upstream_id {
+            JoinSide::Left
+        } else if active_upstream_id == right_upstream_id {
+            JoinSide::Right
+        } else {
+            bail!("active upstream does not belong to join");
+        };
+
+        let mut output = Vec::new();
+        for value in active_values {
+            let join_key = lookup_field(value, key_field)
+                .ok_or_else(|| anyhow!("join key field {key_field} missing"))?;
+            let key = join_key_string(join_key)?;
+            let buffered = BufferedRecord {
+                payload: value.clone(),
+                event_time_epoch_ms: event.event_time_epoch_ms,
+                offset: event.offset,
+            };
+
+            let opposite_records = join_state
+                .other_side(active_side)
+                .get(&key)
+                .cloned()
+                .unwrap_or_default();
+            join_state
+                .side_mut(active_side)
+                .entry(key)
+                .or_default()
+                .push(buffered.clone());
+
+            let matches: Vec<_> = opposite_records
+                .into_iter()
+                .filter(|other| {
+                    within_window(
+                        other.event_time_epoch_ms,
+                        event.event_time_epoch_ms,
+                        within_secs,
+                    )
+                })
+                .collect();
+
+            match (join_kind, active_side, matches.is_empty()) {
+                (JoinKind::Inner, _, true) => {}
+                (JoinKind::Inner, _, false) => {
+                    for matched in matches {
+                        output.push(merge_join_records(
+                            active_side,
+                            &buffered.payload,
+                            &matched.payload,
+                            join_key,
+                        ));
+                    }
+                }
+                (JoinKind::Left, JoinSide::Left, true) => {
+                    output.push(merge_join_records(
+                        active_side,
+                        &buffered.payload,
+                        &Value::Null,
+                        join_key,
+                    ));
+                }
+                (JoinKind::Left, JoinSide::Left, false) => {
+                    for matched in matches {
+                        output.push(merge_join_records(
+                            active_side,
+                            &buffered.payload,
+                            &matched.payload,
+                            join_key,
+                        ));
+                    }
+                }
+                (JoinKind::Left, JoinSide::Right, false) => {
+                    for matched in matches {
+                        output.push(merge_join_records(
+                            active_side,
+                            &buffered.payload,
+                            &matched.payload,
+                            join_key,
+                        ));
+                    }
+                }
+                (JoinKind::Left, JoinSide::Right, true) => {}
+            }
+        }
+
+        Ok(output)
     }
 }
 
@@ -373,12 +733,48 @@ impl AssignmentKey {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 struct AssignmentState {
     aggregates: BTreeMap<String, AggregateState>,
+    joins: BTreeMap<String, JoinState>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+struct JoinState {
+    left: BTreeMap<String, Vec<BufferedRecord>>,
+    right: BTreeMap<String, Vec<BufferedRecord>>,
+}
+
+impl JoinState {
+    fn side_mut(&mut self, side: JoinSide) -> &mut BTreeMap<String, Vec<BufferedRecord>> {
+        match side {
+            JoinSide::Left => &mut self.left,
+            JoinSide::Right => &mut self.right,
+        }
+    }
+
+    fn other_side(&self, side: JoinSide) -> &BTreeMap<String, Vec<BufferedRecord>> {
+        match side {
+            JoinSide::Left => &self.right,
+            JoinSide::Right => &self.left,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct BufferedRecord {
+    payload: Value,
+    event_time_epoch_ms: u64,
+    offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JoinSide {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 enum AggregateState {
     Count(u64),
     Numeric {
@@ -387,6 +783,45 @@ enum AggregateState {
         min: f64,
         max: f64,
     },
+}
+
+#[derive(Default)]
+struct ExecutionOutcome {
+    sink_emissions: Vec<SinkEmission>,
+    dead_letters: Vec<DeadLetterWrite>,
+}
+
+fn deserialize_state(snapshot_state: &Value) -> Result<AssignmentState> {
+    if snapshot_state.is_null() {
+        return Ok(AssignmentState::default());
+    }
+
+    serde_json::from_value(snapshot_state.clone()).map_err(Into::into)
+}
+
+fn group_events_by_partition(events: &[PipelineEvent]) -> BTreeMap<u32, Vec<PipelineEvent>> {
+    let mut grouped = BTreeMap::new();
+    for event in events {
+        grouped
+            .entry(event.partition_id)
+            .or_insert_with(Vec::new)
+            .push(event.clone());
+    }
+    grouped
+}
+
+fn update_aggregate_state(
+    state: &mut AssignmentState,
+    operator_id: &str,
+    function: AggregateFunction,
+    value: &Value,
+) -> Result<Value> {
+    let aggregate = state
+        .aggregates
+        .entry(operator_id.to_owned())
+        .or_insert_with(|| AggregateState::new(function));
+
+    aggregate.update(function, value)
 }
 
 impl AggregateState {
@@ -433,7 +868,7 @@ impl AggregateState {
                     AggregateFunction::Sum => *sum,
                     AggregateFunction::Min => *min,
                     AggregateFunction::Max => *max,
-                    AggregateFunction::Average => *sum / f64::from(*count as u32),
+                    AggregateFunction::Average => *sum / (*count as f64),
                     AggregateFunction::Count => unreachable!("count handled above"),
                 };
 
@@ -455,15 +890,58 @@ fn validate_runtime_supported(pipeline: &PipelineSpec) -> Result<()> {
         DeploymentState::Failed => bail!("pipeline is failed"),
     }
 
-    if pipeline
-        .operators
-        .iter()
-        .any(|operator| matches!(operator.kind, OperatorKind::Join { .. }))
-    {
-        bail!("join operators are deferred to the stateful-processing branch");
-    }
-
     Ok(())
+}
+
+fn operator_active_upstream<'a>(
+    operator: &'a event_pipeline_types::OperatorNode,
+    values: &'a BTreeMap<String, Vec<Value>>,
+) -> Option<(&'a str, Vec<Value>)> {
+    operator.upstream_ids.iter().find_map(|upstream_id| {
+        values
+            .get(upstream_id)
+            .cloned()
+            .map(|value| (upstream_id.as_str(), value))
+    })
+}
+
+fn prune_join_state(join_state: &mut JoinState, event_time_epoch_ms: u64, within_secs: u32) {
+    let prune_before = event_time_epoch_ms.saturating_sub(u64::from(within_secs) * 1_000);
+    for side in [&mut join_state.left, &mut join_state.right] {
+        side.retain(|_, records| {
+            records.retain(|record| record.event_time_epoch_ms >= prune_before);
+            !records.is_empty()
+        });
+    }
+}
+
+fn within_window(left_ms: u64, right_ms: u64, within_secs: u32) -> bool {
+    let delta = left_ms.abs_diff(right_ms);
+    delta <= u64::from(within_secs) * 1_000
+}
+
+fn join_key_string(value: &Value) -> Result<String> {
+    serde_json::to_string(value).map_err(Into::into)
+}
+
+fn merge_join_records(
+    active_side: JoinSide,
+    active_payload: &Value,
+    matched_payload: &Value,
+    join_key: &Value,
+) -> Value {
+    match active_side {
+        JoinSide::Left => json!({
+            "join_key": join_key,
+            "left": active_payload,
+            "right": matched_payload,
+        }),
+        JoinSide::Right => json!({
+            "join_key": join_key,
+            "left": matched_payload,
+            "right": active_payload,
+        }),
+    }
 }
 
 fn single_input_value<'a>(
@@ -528,7 +1006,7 @@ fn parse_literal(input: &str) -> Value {
     if let Ok(number) = input.parse::<f64>() {
         return Number::from_f64(number).map_or(Value::Null, Value::Number);
     }
-    Value::String(input.trim_matches('"').to_owned())
+    Value::String(input.trim_matches('"').trim_matches('\'').to_owned())
 }
 
 fn project_value(projection: &str, value: &Value) -> Result<Value> {
@@ -645,16 +1123,18 @@ fn sink_destination(kind: &SinkKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckpointWrite, PipelineEvent, PollProcessorResponse, ProcessorRepository,
+        CheckpointWrite, DeadLetterWrite, LoadedCheckpoint, PipelineEvent, ProcessorRepository,
         ProcessorService, ProcessorSettings,
     };
     use anyhow::Result;
     use async_trait::async_trait;
     use event_pipeline_types::{
-        AggregateFunction, CheckpointSummary, DeploymentConfig, DeploymentState, EventEncoding,
-        OperatorKind, OperatorNode, PartitionAssignment, PipelineSpec, ReplayPolicy, SinkKind,
-        SinkSpec, SourceTopic, WindowKind, WindowSpec,
+        AggregateFunction, CheckpointSummary, DeadLetterRecord, DeploymentConfig, DeploymentState,
+        EventEncoding, JoinKind, OperatorKind, OperatorNode, PartitionAssignment, PipelineSpec,
+        ReplayJob, ReplayJobStatus, ReplayPolicy, SinkKind, SinkSpec, SourceTopic, WindowKind,
+        WindowSpec,
     };
+    use serde_json::{Value, json};
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -663,8 +1143,10 @@ mod tests {
     struct InMemoryProcessorRepository {
         assignments: RwLock<BTreeMap<String, Vec<PartitionAssignment>>>,
         pipelines: RwLock<BTreeMap<(String, String, u32), PipelineSpec>>,
-        checkpoints: RwLock<BTreeMap<(String, String, u32), CheckpointSummary>>,
+        checkpoints: RwLock<BTreeMap<(String, String, u32), LoadedCheckpoint>>,
         events: RwLock<BTreeMap<(String, String, u32), Vec<PipelineEvent>>>,
+        replay_jobs: RwLock<Vec<ReplayJob>>,
+        dead_letters: RwLock<Vec<DeadLetterRecord>>,
     }
 
     #[async_trait]
@@ -701,7 +1183,7 @@ mod tests {
             tenant_id: &str,
             pipeline_id: &str,
             partition_id: u32,
-        ) -> Result<Option<CheckpointSummary>> {
+        ) -> Result<Option<LoadedCheckpoint>> {
             Ok(self
                 .checkpoints
                 .read()
@@ -734,11 +1216,15 @@ mod tests {
         async fn append_checkpoint(
             &self,
             checkpoint: &CheckpointWrite,
-        ) -> Result<CheckpointSummary> {
-            let summary = CheckpointSummary {
-                partition_id: checkpoint.partition_id,
-                offset: checkpoint.offset,
-                snapshot_uri: checkpoint.snapshot_uri.clone(),
+        ) -> Result<LoadedCheckpoint> {
+            let loaded = LoadedCheckpoint {
+                summary: CheckpointSummary {
+                    partition_id: checkpoint.partition_id,
+                    offset: checkpoint.offset,
+                    snapshot_uri: checkpoint.snapshot_uri.clone(),
+                    snapshot_version: checkpoint.snapshot_version,
+                },
+                snapshot_state: checkpoint.snapshot_state.clone(),
             };
             self.checkpoints.write().await.insert(
                 (
@@ -746,9 +1232,116 @@ mod tests {
                     checkpoint.pipeline_id.clone(),
                     checkpoint.partition_id,
                 ),
-                summary.clone(),
+                loaded.clone(),
             );
-            Ok(summary)
+            Ok(loaded)
+        }
+
+        async fn claim_pending_replay_job(&self, worker_id: &str) -> Result<Option<ReplayJob>> {
+            let mut replay_jobs = self.replay_jobs.write().await;
+            if let Some(replay_job) = replay_jobs
+                .iter_mut()
+                .find(|replay_job| replay_job.status == ReplayJobStatus::Pending)
+            {
+                replay_job.status = ReplayJobStatus::Running;
+                replay_job.claimed_by_worker_id = Some(worker_id.to_owned());
+                return Ok(Some(replay_job.clone()));
+            }
+
+            Ok(None)
+        }
+
+        async fn fetch_replay_events(
+            &self,
+            tenant_id: &str,
+            pipeline_id: &str,
+            from_offset: u64,
+            to_offset: Option<u64>,
+            last_processed_offset: Option<u64>,
+            limit: usize,
+        ) -> Result<Vec<PipelineEvent>> {
+            let lower_bound = last_processed_offset.unwrap_or(from_offset.saturating_sub(1));
+            let upper_bound = to_offset.unwrap_or(u64::MAX);
+            let mut events: Vec<_> = self
+                .events
+                .read()
+                .await
+                .iter()
+                .filter(|((stored_tenant_id, stored_pipeline_id, _), _)| {
+                    stored_tenant_id == tenant_id && stored_pipeline_id == pipeline_id
+                })
+                .flat_map(|(_, events)| events.clone())
+                .filter(|event| {
+                    event.offset > lower_bound
+                        && event.offset >= from_offset
+                        && event.offset <= upper_bound
+                })
+                .collect();
+            events.sort_by_key(|event| (event.partition_id, event.offset));
+            events.truncate(limit);
+            Ok(events)
+        }
+
+        async fn update_replay_job_progress(
+            &self,
+            replay_job_id: &str,
+            last_processed_offset: u64,
+        ) -> Result<ReplayJob> {
+            let mut replay_jobs = self.replay_jobs.write().await;
+            let replay_job = replay_jobs
+                .iter_mut()
+                .find(|replay_job| replay_job.replay_job_id == replay_job_id)
+                .ok_or_else(|| anyhow::anyhow!("replay job not found"))?;
+            replay_job.last_processed_offset = Some(last_processed_offset);
+            Ok(replay_job.clone())
+        }
+
+        async fn complete_replay_job(
+            &self,
+            replay_job_id: &str,
+            last_processed_offset: Option<u64>,
+        ) -> Result<ReplayJob> {
+            let mut replay_jobs = self.replay_jobs.write().await;
+            let replay_job = replay_jobs
+                .iter_mut()
+                .find(|replay_job| replay_job.replay_job_id == replay_job_id)
+                .ok_or_else(|| anyhow::anyhow!("replay job not found"))?;
+            replay_job.status = ReplayJobStatus::Succeeded;
+            replay_job.last_processed_offset = last_processed_offset;
+            Ok(replay_job.clone())
+        }
+
+        async fn fail_replay_job(
+            &self,
+            replay_job_id: &str,
+            error_message: &str,
+            last_processed_offset: Option<u64>,
+        ) -> Result<ReplayJob> {
+            let mut replay_jobs = self.replay_jobs.write().await;
+            let replay_job = replay_jobs
+                .iter_mut()
+                .find(|replay_job| replay_job.replay_job_id == replay_job_id)
+                .ok_or_else(|| anyhow::anyhow!("replay job not found"))?;
+            replay_job.status = ReplayJobStatus::Failed;
+            replay_job.error_message = Some(error_message.to_owned());
+            replay_job.last_processed_offset = last_processed_offset;
+            Ok(replay_job.clone())
+        }
+
+        async fn append_dead_letter(
+            &self,
+            dead_letter: &DeadLetterWrite,
+        ) -> Result<DeadLetterRecord> {
+            let record = DeadLetterRecord {
+                source_id: dead_letter.source_id.clone(),
+                partition_id: dead_letter.partition_id,
+                event_offset: dead_letter.event_offset,
+                record_key: dead_letter.record_key.clone(),
+                failure_reason: dead_letter.failure_reason.clone(),
+                retryable: dead_letter.retryable,
+            };
+            self.dead_letters.write().await.push(record.clone());
+            Ok(record)
         }
     }
 
@@ -763,7 +1356,7 @@ mod tests {
         }
     }
 
-    fn pipeline() -> PipelineSpec {
+    fn aggregate_pipeline() -> PipelineSpec {
         PipelineSpec {
             tenant_id: String::from("tenant-a"),
             pipeline_id: String::from("pipeline-a"),
@@ -829,24 +1422,72 @@ mod tests {
         }
     }
 
-    fn event(offset: u64, status: &str, value: u64) -> PipelineEvent {
+    fn join_pipeline() -> PipelineSpec {
+        PipelineSpec {
+            tenant_id: String::from("tenant-a"),
+            pipeline_id: String::from("pipeline-a"),
+            version: 1,
+            sources: vec![
+                SourceTopic {
+                    source_id: String::from("orders"),
+                    topic_name: String::from("orders.v1"),
+                    partition_count: 4,
+                    partition_key: String::from("account_id"),
+                    encoding: EventEncoding::Json,
+                },
+                SourceTopic {
+                    source_id: String::from("profiles"),
+                    topic_name: String::from("profiles.v1"),
+                    partition_count: 4,
+                    partition_key: String::from("account_id"),
+                    encoding: EventEncoding::Json,
+                },
+            ],
+            operators: vec![OperatorNode {
+                operator_id: String::from("join_orders_profiles"),
+                upstream_ids: vec![String::from("orders"), String::from("profiles")],
+                kind: OperatorKind::Join {
+                    kind: JoinKind::Left,
+                    key_field: String::from("account_id"),
+                    within_secs: 60,
+                },
+            }],
+            sinks: vec![SinkSpec {
+                sink_id: String::from("joined"),
+                upstream_id: String::from("join_orders_profiles"),
+                kind: SinkKind::MaterializedView {
+                    view_name: String::from("joined_mv"),
+                },
+            }],
+            deployment: DeploymentConfig {
+                parallelism: 4,
+                checkpoint_interval_secs: 15,
+                max_in_flight_messages: 256,
+            },
+            replay_policy: ReplayPolicy {
+                allow_manual_replay: true,
+                retention_hours: 24,
+            },
+            deployment_state: DeploymentState::Running,
+        }
+    }
+
+    fn event(source_id: &str, partition_id: u32, offset: u64, payload: Value) -> PipelineEvent {
         PipelineEvent {
             tenant_id: String::from("tenant-a"),
             pipeline_id: String::from("pipeline-a"),
-            source_id: String::from("orders"),
-            partition_id: 0,
+            source_id: source_id.to_owned(),
+            partition_id,
             offset,
-            record_key: format!("order-{offset}"),
-            payload: serde_json::json!({
-                "tenant_id": "tenant-a",
-                "status": status,
-                "value": value,
-            }),
+            record_key: format!("{source_id}-{offset}"),
+            payload,
             event_time_epoch_ms: 1_735_000_000_000 + (offset * 1_000),
         }
     }
 
-    async fn build_service() -> (ProcessorService, Arc<InMemoryProcessorRepository>) {
+    async fn build_service(
+        pipeline: PipelineSpec,
+    ) -> (ProcessorService, Arc<InMemoryProcessorRepository>) {
         let repository = Arc::new(InMemoryProcessorRepository::default());
         repository
             .assignments
@@ -855,7 +1496,7 @@ mod tests {
             .insert(String::from("worker-a"), vec![assignment()]);
         repository.pipelines.write().await.insert(
             (String::from("tenant-a"), String::from("pipeline-a"), 1),
-            pipeline(),
+            pipeline,
         );
 
         let service = ProcessorService::new(
@@ -870,14 +1511,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poll_once_processes_partition_and_writes_checkpoint() -> Result<()> {
-        let (service, repository) = build_service().await;
+    async fn poll_once_processes_partition_and_persists_snapshot_checkpoint() -> Result<()> {
+        let (service, repository) = build_service(aggregate_pipeline()).await;
         repository.events.write().await.insert(
             (String::from("tenant-a"), String::from("pipeline-a"), 0),
             vec![
-                event(1, "paid", 10),
-                event(2, "paid", 20),
-                event(3, "pending", 30),
+                event(
+                    "orders",
+                    0,
+                    1,
+                    json!({"tenant_id": "tenant-a", "status": "paid", "value": 10}),
+                ),
+                event(
+                    "orders",
+                    0,
+                    2,
+                    json!({"tenant_id": "tenant-a", "status": "paid", "value": 20}),
+                ),
             ],
         );
 
@@ -886,128 +1536,133 @@ mod tests {
         assert!(response.failed_assignments.is_empty());
         assert_eq!(response.processed_assignments.len(), 1);
         let processed = &response.processed_assignments[0];
-        assert_eq!(processed.processed_event_count, 3);
-        assert_eq!(processed.start_offset, 0);
+        assert_eq!(processed.processed_event_count, 2);
+        assert_eq!(processed.sink_emissions.len(), 2);
+        assert_eq!(processed.dead_letter_count, 0);
         assert_eq!(
             processed
                 .checkpoint
                 .as_ref()
-                .map(|checkpoint| checkpoint.offset),
-            Some(3)
+                .map(|checkpoint| checkpoint.snapshot_version),
+            Some(1)
         );
-        assert_eq!(processed.sink_emissions.len(), 2);
-        assert_eq!(
-            processed.sink_emissions[0].payload["count"],
-            serde_json::json!(1)
-        );
-        assert_eq!(
-            processed.sink_emissions[1].payload["count"],
-            serde_json::json!(2)
-        );
+
+        let checkpoint = repository
+            .latest_checkpoint("tenant-a", "pipeline-a", 0)
+            .await?
+            .expect("checkpoint should exist");
+        assert!(checkpoint.snapshot_state["aggregates"]["count_amount"].is_object());
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn poll_once_resumes_from_latest_checkpoint() -> Result<()> {
-        let (service, repository) = build_service().await;
+    async fn join_operator_emits_left_join_records() -> Result<()> {
+        let (service, repository) = build_service(join_pipeline()).await;
         repository.events.write().await.insert(
             (String::from("tenant-a"), String::from("pipeline-a"), 0),
             vec![
-                event(1, "paid", 10),
-                event(2, "paid", 20),
-                event(3, "paid", 30),
+                event(
+                    "profiles",
+                    0,
+                    1,
+                    json!({"account_id": "a-1", "plan": "pro"}),
+                ),
+                event("orders", 0, 2, json!({"account_id": "a-1", "amount": 42})),
             ],
-        );
-        repository.checkpoints.write().await.insert(
-            (String::from("tenant-a"), String::from("pipeline-a"), 0),
-            CheckpointSummary {
-                partition_id: 0,
-                offset: 1,
-                snapshot_uri: String::from("processor-runtime://offset/1"),
-            },
         );
 
         let response = service.poll_once().await?;
         let processed = &response.processed_assignments[0];
 
-        assert_eq!(processed.start_offset, 1);
-        assert_eq!(processed.processed_event_count, 2);
+        assert_eq!(processed.sink_emissions.len(), 1);
         assert_eq!(
-            processed
-                .checkpoint
-                .as_ref()
-                .map(|checkpoint| checkpoint.offset),
-            Some(3)
+            processed.sink_emissions[0].payload["left"]["amount"],
+            json!(42)
+        );
+        assert_eq!(
+            processed.sink_emissions[0].payload["right"]["plan"],
+            json!("pro")
         );
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn aggregate_state_persists_across_polls() -> Result<()> {
-        let (service, repository) = build_service().await;
-        repository.events.write().await.insert(
-            (String::from("tenant-a"), String::from("pipeline-a"), 0),
-            vec![event(1, "paid", 10), event(2, "paid", 20)],
-        );
-
-        let first = service.poll_once().await?;
-        assert_eq!(
-            first.processed_assignments[0].sink_emissions[1].payload["count"],
-            serde_json::json!(2)
-        );
-
+    async fn replay_jobs_are_claimed_processed_and_completed() -> Result<()> {
+        let (service, repository) = build_service(aggregate_pipeline()).await;
         repository.events.write().await.insert(
             (String::from("tenant-a"), String::from("pipeline-a"), 0),
             vec![
-                event(1, "paid", 10),
-                event(2, "paid", 20),
-                event(3, "paid", 30),
+                event(
+                    "orders",
+                    0,
+                    10,
+                    json!({"tenant_id": "tenant-a", "status": "paid", "value": 10}),
+                ),
+                event(
+                    "orders",
+                    0,
+                    11,
+                    json!({"tenant_id": "tenant-a", "status": "paid", "value": 20}),
+                ),
             ],
         );
+        repository.replay_jobs.write().await.push(ReplayJob {
+            replay_job_id: String::from("replay-1"),
+            tenant_id: String::from("tenant-a"),
+            pipeline_id: String::from("pipeline-a"),
+            version: 1,
+            from_offset: 10,
+            to_offset: Some(11),
+            reason: String::from("backfill"),
+            status: ReplayJobStatus::Pending,
+            claimed_by_worker_id: None,
+            last_processed_offset: None,
+            error_message: None,
+        });
 
-        let second = service.poll_once().await?;
-        assert_eq!(second.processed_assignments[0].sink_emissions.len(), 1);
-        assert_eq!(
-            second.processed_assignments[0].sink_emissions[0].payload["count"],
-            serde_json::json!(3)
-        );
+        let response = service.poll_once().await?;
+
+        assert_eq!(response.processed_replay_jobs.len(), 1);
+        let replay = &response.processed_replay_jobs[0];
+        assert_eq!(replay.processed_event_count, 2);
+        assert_eq!(replay.replay_job.status, ReplayJobStatus::Succeeded);
+        assert_eq!(replay.replay_job.last_processed_offset, Some(11));
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn join_operator_is_reported_as_failed_assignment() -> Result<()> {
-        let (service, repository) = build_service().await;
-        let mut join_pipeline = pipeline();
-        join_pipeline.operators.push(OperatorNode {
-            operator_id: String::from("join_inventory"),
-            upstream_ids: vec![String::from("orders"), String::from("project_amount")],
-            kind: OperatorKind::Join {
-                kind: event_pipeline_types::JoinKind::Inner,
-                key_field: String::from("tenant_id"),
-                within_secs: 60,
-            },
-        });
-        repository.pipelines.write().await.insert(
-            (String::from("tenant-a"), String::from("pipeline-a"), 1),
-            join_pipeline,
-        );
+    async fn malformed_events_are_dead_lettered_without_failing_assignment() -> Result<()> {
+        let (service, repository) = build_service(aggregate_pipeline()).await;
         repository.events.write().await.insert(
             (String::from("tenant-a"), String::from("pipeline-a"), 0),
-            vec![event(1, "paid", 10)],
+            vec![
+                event(
+                    "orders",
+                    0,
+                    1,
+                    json!({"tenant_id": "tenant-a", "value": 10}),
+                ),
+                event(
+                    "orders",
+                    0,
+                    2,
+                    json!({"tenant_id": "tenant-a", "status": "paid", "value": 20}),
+                ),
+            ],
         );
 
-        let response: PollProcessorResponse = service.poll_once().await?;
+        let response = service.poll_once().await?;
 
-        assert!(response.processed_assignments.is_empty());
-        assert_eq!(response.failed_assignments.len(), 1);
-        assert!(
-            response.failed_assignments[0]
-                .reason
-                .contains("stateful-processing branch")
-        );
+        assert!(response.failed_assignments.is_empty());
+        let processed = &response.processed_assignments[0];
+        assert_eq!(processed.dead_letter_count, 1);
+        assert_eq!(processed.sink_emissions.len(), 1);
+        let dead_letters = repository.dead_letters.read().await;
+        assert_eq!(dead_letters.len(), 1);
+        assert_eq!(dead_letters[0].event_offset, 1);
 
         Ok(())
     }
