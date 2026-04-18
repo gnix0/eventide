@@ -8,10 +8,10 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-event-pipeline-config = { path = "../../crates/config" }
-event-pipeline-coordinator-app = { path = "../../crates/coordinator-app" }
-event-pipeline-postgres-store = { path = "../../crates/postgres-store" }
-event-pipeline-runtime = { path = "../../crates/runtime" }
-event-pipeline-types = { path = "../../crates/types" }
+eventide-config = { path = "../../crates/config" }
+eventide-coordinator-app = { path = "../../crates/coordinator-app" }
+eventide-postgres-store = { path = "../../crates/postgres-store" }
+eventide-runtime = { path = "../../crates/runtime" }
+eventide-types = { path = "../../crates/types" }
 tokio.workspace = true
 tracing.workspace = true

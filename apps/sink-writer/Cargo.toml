@@ -8,7 +8,7 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-event-pipeline-config = { path = "../../crates/config" }
-event-pipeline-runtime = { path = "../../crates/runtime" }
-event-pipeline-types = { path = "../../crates/types" }
+eventide-config = { path = "../../crates/config" }
+eventide-runtime = { path = "../../crates/runtime" }
+eventide-types = { path = "../../crates/types" }
 tokio.workspace = true

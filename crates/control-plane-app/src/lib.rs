@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use event_pipeline_types::{
+use eventide_types::{
     AssignRoleBindingRequest, AssignRoleBindingResponse, AuthenticatedPrincipal,
     CreatePipelineRequest, CreatePipelineResponse, CreateServiceAccountRequest,
     CreateServiceAccountResponse, CreateTenantRequest, CreateTenantResponse, DeploymentState,
@@ -760,7 +760,7 @@ impl MetadataRepository for InMemoryMetadataRepository {
 #[cfg(test)]
 mod tests {
     use super::{IdentityService, InMemoryMetadataRepository, MetadataRepository, MetadataService};
-    use event_pipeline_types::{
+    use eventide_types::{
         AggregateFunction, AssignRoleBindingRequest, AuthenticatedPrincipal, CreatePipelineRequest,
         CreateServiceAccountRequest, CreateTenantRequest, DeploymentState, EventEncoding,
         GetReplayJobRequest, ListPipelinesRequest, ListRoleBindingsRequest,
@@ -784,7 +784,7 @@ mod tests {
             .expect("pipeline creation should succeed");
 
         let response = service
-            .get_pipeline(event_pipeline_types::GetPipelineRequest {
+            .get_pipeline(eventide_types::GetPipelineRequest {
                 tenant_id: pipeline.tenant_id.clone(),
                 pipeline_id: pipeline.pipeline_id.clone(),
                 version: None,
@@ -915,7 +915,7 @@ mod tests {
                 tenant: TenantRecord {
                     tenant_id: String::from("tenant-acme"),
                     display_name: String::from("Acme"),
-                    oidc_realm: String::from("event-pipeline"),
+                    oidc_realm: String::from("eventide"),
                     enabled: true,
                 },
             })
@@ -976,7 +976,7 @@ mod tests {
                 tenant: TenantRecord {
                     tenant_id: String::from("tenant-acme"),
                     display_name: String::from("Acme"),
-                    oidc_realm: String::from("event-pipeline"),
+                    oidc_realm: String::from("eventide"),
                     enabled: true,
                 },
             })
@@ -1000,7 +1000,7 @@ mod tests {
                     subject_id: String::from("user-123"),
                     preferred_username: Some(String::from("alice")),
                     issuer: String::from("issuer"),
-                    audience: vec![String::from("event-pipeline-api")],
+                    audience: vec![String::from("eventide-api")],
                     realm_roles: Vec::new(),
                 },
                 "tenant-acme",
@@ -1056,12 +1056,12 @@ mod tests {
                     view_name: String::from("orders_throughput"),
                 },
             }],
-            deployment: event_pipeline_types::DeploymentConfig {
+            deployment: eventide_types::DeploymentConfig {
                 parallelism: 12,
                 checkpoint_interval_secs: 30,
                 max_in_flight_messages: 5_000,
             },
-            replay_policy: event_pipeline_types::ReplayPolicy {
+            replay_policy: eventide_types::ReplayPolicy {
                 allow_manual_replay: true,
                 retention_hours: 168,
             },

@@ -1,9 +1,9 @@
 use anyhow::Result;
-use event_pipeline_config::ServiceRuntimeConfig;
-use event_pipeline_postgres_store::PostgresMetadataRepository;
-use event_pipeline_processor_app::{ProcessorService, ProcessorSettings};
-use event_pipeline_runtime::init_tracing;
-use event_pipeline_types::ServiceName;
+use eventide_config::ServiceRuntimeConfig;
+use eventide_postgres_store::PostgresMetadataRepository;
+use eventide_processor_app::{ProcessorService, ProcessorSettings};
+use eventide_runtime::init_tracing;
+use eventide_types::ServiceName;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};

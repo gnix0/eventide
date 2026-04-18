@@ -1,5 +1,5 @@
 [package]
-name = "event-pipeline-coordinator-app"
+name = "eventide-coordinator-app"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,5 +9,5 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-event-pipeline-types = { path = "../types" }
+eventide-types = { path = "../types" }
 tokio.workspace = true

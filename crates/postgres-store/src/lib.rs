@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use event_pipeline_control_plane_app::MetadataRepository;
-use event_pipeline_coordinator_app::{CoordinatorRepository, LeaseExpiryOutcome};
-use event_pipeline_processor_app::{
+use eventide_control_plane_app::MetadataRepository;
+use eventide_coordinator_app::{CoordinatorRepository, LeaseExpiryOutcome};
+use eventide_processor_app::{
     CheckpointWrite, DeadLetterWrite, LoadedCheckpoint, PipelineEvent, ProcessorRepository,
 };
-use event_pipeline_query_app::{PartitionHighWatermark, QueryRepository};
-use event_pipeline_types::{
+use eventide_query_app::{PartitionHighWatermark, QueryRepository};
+use eventide_types::{
     DeadLetterRecord, DeploymentState, PartitionAssignment, PipelineSpec, PipelineSummary,
     PlatformRole, RegisteredTopic, ReplayJob, ReplayJobStatus, RoleBinding, ServiceAccount,
     SubjectKind, TenantRecord, TenantSummary, TopicSummary, WorkerRecord, WorkerStatus,
@@ -77,7 +77,7 @@ impl MetadataRepository for PostgresMetadataRepository {
             &TenantRecord {
                 tenant_id: pipeline.tenant_id.clone(),
                 display_name: pipeline.tenant_id.clone(),
-                oidc_realm: String::from("event-pipeline"),
+                oidc_realm: String::from("eventide"),
                 enabled: true,
             },
         )
@@ -143,7 +143,7 @@ impl MetadataRepository for PostgresMetadataRepository {
             &TenantRecord {
                 tenant_id: pipeline.tenant_id.clone(),
                 display_name: pipeline.tenant_id.clone(),
-                oidc_realm: String::from("event-pipeline"),
+                oidc_realm: String::from("eventide"),
                 enabled: true,
             },
         )
@@ -371,7 +371,7 @@ impl MetadataRepository for PostgresMetadataRepository {
             &TenantRecord {
                 tenant_id: topic.tenant_id.clone(),
                 display_name: topic.tenant_id.clone(),
-                oidc_realm: String::from("event-pipeline"),
+                oidc_realm: String::from("eventide"),
                 enabled: true,
             },
         )
@@ -966,7 +966,7 @@ impl ProcessorRepository for PostgresMetadataRepository {
             let Json(snapshot_state) =
                 row.try_get::<Json<serde_json::Value>, _>("snapshot_state")?;
             Ok(LoadedCheckpoint {
-                summary: event_pipeline_types::CheckpointSummary {
+                summary: eventide_types::CheckpointSummary {
                     partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
                     offset: u64::try_from(row.try_get::<i64, _>("kafka_offset")?)?,
                     snapshot_uri: row.try_get("snapshot_uri")?,
@@ -1064,7 +1064,7 @@ impl ProcessorRepository for PostgresMetadataRepository {
         .await?;
 
         Ok(LoadedCheckpoint {
-            summary: event_pipeline_types::CheckpointSummary {
+            summary: eventide_types::CheckpointSummary {
                 partition_id: checkpoint.partition_id,
                 offset: checkpoint.offset,
                 snapshot_uri: checkpoint.snapshot_uri.clone(),
@@ -1368,7 +1368,7 @@ impl QueryRepository for PostgresMetadataRepository {
         &self,
         tenant_id: &str,
         pipeline_id: &str,
-    ) -> Result<Vec<event_pipeline_types::CheckpointSummary>> {
+    ) -> Result<Vec<eventide_types::CheckpointSummary>> {
         let rows = sqlx::query(
             r#"
             select
@@ -1389,7 +1389,7 @@ impl QueryRepository for PostgresMetadataRepository {
 
         rows.into_iter()
             .map(|row| {
-                Ok(event_pipeline_types::CheckpointSummary {
+                Ok(eventide_types::CheckpointSummary {
                     partition_id: u32::try_from(row.try_get::<i32, _>("partition_id")?)?,
                     offset: u64::try_from(row.try_get::<i64, _>("kafka_offset")?)?,
                     snapshot_uri: row.try_get("snapshot_uri")?,

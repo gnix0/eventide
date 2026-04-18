@@ -1,5 +1,5 @@
 [package]
-name = "event-pipeline-types"
+name = "eventide-types"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

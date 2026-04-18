@@ -1,5 +1,5 @@
 [package]
-name = "event-pipeline-auth"
+name = "eventide-auth"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,6 +8,6 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-event-pipeline-types = { path = "../types" }
+eventide-types = { path = "../types" }
 jsonwebtoken.workspace = true
 serde.workspace = true

@@ -1,4 +1,4 @@
-use event_pipeline_types::ServiceName;
+use eventide_types::ServiceName;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceRuntimeConfig {
@@ -22,7 +22,7 @@ impl ServiceRuntimeConfig {
     pub fn from_env(service_name: ServiceName) -> Self {
         let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:8080"));
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            String::from("postgres://postgres:postgres@127.0.0.1:5432/event_pipeline")
+            String::from("postgres://postgres:postgres@127.0.0.1:5432/eventide")
         });
         let metrics_addr =
             std::env::var("METRICS_ADDR").unwrap_or_else(|_| String::from("0.0.0.0:9090"));
@@ -45,9 +45,9 @@ impl ServiceRuntimeConfig {
             .and_then(|value| value.parse().ok())
             .unwrap_or(90);
         let oidc_audience =
-            std::env::var("OIDC_AUDIENCE").unwrap_or_else(|_| String::from("event-pipeline-api"));
+            std::env::var("OIDC_AUDIENCE").unwrap_or_else(|_| String::from("eventide-api"));
         let oidc_issuer_url = std::env::var("OIDC_ISSUER_URL")
-            .unwrap_or_else(|_| String::from("http://localhost:8081/realms/event-pipeline"));
+            .unwrap_or_else(|_| String::from("http://localhost:8081/realms/eventide"));
         let oidc_public_key_pem = std::env::var("OIDC_PUBLIC_KEY_PEM")
             .ok()
             .filter(|value| !value.trim().is_empty());

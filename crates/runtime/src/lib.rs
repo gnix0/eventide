@@ -1,5 +1,5 @@
 use anyhow::Result;
-use event_pipeline_config::ServiceRuntimeConfig;
+use eventide_config::ServiceRuntimeConfig;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 

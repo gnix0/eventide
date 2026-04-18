@@ -28,9 +28,9 @@ name = "api-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-config",
- "event-pipeline-runtime",
- "event-pipeline-types",
+ "eventide-config",
+ "eventide-runtime",
+ "eventide-types",
  "tokio",
 ]
 
@@ -150,12 +150,12 @@ name = "control-plane"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-auth",
- "event-pipeline-config",
- "event-pipeline-control-plane-app",
- "event-pipeline-postgres-store",
- "event-pipeline-runtime",
- "event-pipeline-types",
+ "eventide-auth",
+ "eventide-config",
+ "eventide-control-plane-app",
+ "eventide-postgres-store",
+ "eventide-runtime",
+ "eventide-types",
  "sqlx",
  "tokio",
  "tracing",
@@ -166,11 +166,11 @@ name = "coordinator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-config",
- "event-pipeline-coordinator-app",
- "event-pipeline-postgres-store",
- "event-pipeline-runtime",
- "event-pipeline-types",
+ "eventide-config",
+ "eventide-coordinator-app",
+ "eventide-postgres-store",
+ "eventide-runtime",
+ "eventide-types",
  "tokio",
  "tracing",
 ]
@@ -419,66 +419,66 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-pipeline-auth"
+name = "eventide-auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-types",
+ "eventide-types",
  "jsonwebtoken",
  "serde",
 ]
 
 [[package]]
-name = "event-pipeline-config"
+name = "eventide-config"
 version = "0.1.0"
 dependencies = [
- "event-pipeline-types",
+ "eventide-types",
 ]
 
 [[package]]
-name = "event-pipeline-control-plane-app"
+name = "eventide-control-plane-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "event-pipeline-types",
+ "eventide-types",
  "tokio",
  "uuid",
 ]
 
 [[package]]
-name = "event-pipeline-coordinator-app"
+name = "eventide-coordinator-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "event-pipeline-types",
+ "eventide-types",
  "tokio",
 ]
 
 [[package]]
-name = "event-pipeline-postgres-store"
+name = "eventide-postgres-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "event-pipeline-control-plane-app",
- "event-pipeline-coordinator-app",
- "event-pipeline-processor-app",
- "event-pipeline-query-app",
- "event-pipeline-types",
+ "eventide-control-plane-app",
+ "eventide-coordinator-app",
+ "eventide-processor-app",
+ "eventide-query-app",
+ "eventide-types",
  "serde_json",
  "sqlx",
  "uuid",
 ]
 
 [[package]]
-name = "event-pipeline-processor-app"
+name = "eventide-processor-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "event-pipeline-types",
+ "eventide-types",
  "serde",
  "serde_json",
  "tokio",
@@ -486,28 +486,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "event-pipeline-query-app"
+name = "eventide-query-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "event-pipeline-types",
+ "eventide-types",
  "tokio",
 ]
 
 [[package]]
-name = "event-pipeline-runtime"
+name = "eventide-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-config",
+ "eventide-config",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
-name = "event-pipeline-types"
+name = "eventide-types"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -1260,11 +1260,11 @@ name = "processor-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-config",
- "event-pipeline-postgres-store",
- "event-pipeline-processor-app",
- "event-pipeline-runtime",
- "event-pipeline-types",
+ "eventide-config",
+ "eventide-postgres-store",
+ "eventide-processor-app",
+ "eventide-runtime",
+ "eventide-types",
  "tokio",
  "tracing",
 ]
@@ -1274,11 +1274,11 @@ name = "query-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-config",
- "event-pipeline-postgres-store",
- "event-pipeline-query-app",
- "event-pipeline-runtime",
- "event-pipeline-types",
+ "eventide-config",
+ "eventide-postgres-store",
+ "eventide-query-app",
+ "eventide-runtime",
+ "eventide-types",
  "tokio",
  "tracing",
 ]
@@ -1617,9 +1617,9 @@ name = "sink-writer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-config",
- "event-pipeline-runtime",
- "event-pipeline-types",
+ "eventide-config",
+ "eventide-runtime",
+ "eventide-types",
  "tokio",
 ]
 
@@ -1872,9 +1872,9 @@ name = "state-manager"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "event-pipeline-config",
- "event-pipeline-runtime",
- "event-pipeline-types",
+ "eventide-config",
+ "eventide-runtime",
+ "eventide-types",
  "tokio",
 ]
 

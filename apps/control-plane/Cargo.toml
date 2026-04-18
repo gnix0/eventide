@@ -8,12 +8,12 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-event-pipeline-auth = { path = "../../crates/auth" }
-event-pipeline-config = { path = "../../crates/config" }
-event-pipeline-control-plane-app = { path = "../../crates/control-plane-app" }
-event-pipeline-postgres-store = { path = "../../crates/postgres-store" }
-event-pipeline-runtime = { path = "../../crates/runtime" }
-event-pipeline-types = { path = "../../crates/types" }
+eventide-auth = { path = "../../crates/auth" }
+eventide-config = { path = "../../crates/config" }
+eventide-control-plane-app = { path = "../../crates/control-plane-app" }
+eventide-postgres-store = { path = "../../crates/postgres-store" }
+eventide-runtime = { path = "../../crates/runtime" }
+eventide-types = { path = "../../crates/types" }
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true

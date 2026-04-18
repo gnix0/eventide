@@ -22,7 +22,7 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/gnix0/event-pipeline"
+repository = "https://github.com/gnix0/eventide"
 rust-version = "1.94"
 version = "0.1.0"
 

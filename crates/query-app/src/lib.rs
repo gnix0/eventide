@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use event_pipeline_types::{
+use eventide_types::{
     CheckpointSummary, DeadLetterRecord, DeploymentState, GetCheckpointHistoryRequest,
     GetCheckpointHistoryResponse, GetRunStatusRequest, GetRunStatusResponse,
     ListAssignmentsRequest, ListAssignmentsResponse, ListDeadLettersRequest,
@@ -167,8 +167,8 @@ impl QueryService {
             .filter(|replay_job| {
                 matches!(
                     replay_job.status,
-                    event_pipeline_types::ReplayJobStatus::Pending
-                        | event_pipeline_types::ReplayJobStatus::Running
+                    eventide_types::ReplayJobStatus::Pending
+                        | eventide_types::ReplayJobStatus::Running
                 )
             })
             .count();
@@ -397,7 +397,7 @@ impl QueryRepository for InMemoryQueryRepository {
 #[cfg(test)]
 mod tests {
     use super::{InMemoryQueryRepository, PartitionHighWatermark, QueryService, QuerySettings};
-    use event_pipeline_types::{
+    use eventide_types::{
         CheckpointSummary, DeadLetterRecord, DeploymentConfig, DeploymentState, EventEncoding,
         GetCheckpointHistoryRequest, GetRunStatusRequest, ListAssignmentsRequest,
         ListDeadLettersRequest, ListReplayJobsRequest, PartitionAssignment, PipelineSpec,

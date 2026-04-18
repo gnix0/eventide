@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use event_pipeline_types::{
+use eventide_types::{
     DeploymentState, ExpireWorkerLeasesRequest, ExpireWorkerLeasesResponse, HeartbeatWorkerRequest,
     HeartbeatWorkerResponse, ListAssignmentsRequest, ListAssignmentsResponse, ListWorkersRequest,
     ListWorkersResponse, PartitionAssignment, PipelineSpec, RebalancePipelineRequest,
@@ -578,7 +578,7 @@ mod tests {
     use super::{
         CoordinatorService, CoordinatorSettings, InMemoryCoordinatorRepository, current_epoch_secs,
     };
-    use event_pipeline_types::{
+    use eventide_types::{
         AggregateFunction, DeploymentConfig, DeploymentState, EventEncoding,
         ExpireWorkerLeasesRequest, HeartbeatWorkerRequest, JoinKind, ListAssignmentsRequest,
         OperatorKind, OperatorNode, PipelineSpec, RebalancePipelineRequest, RegisterWorkerRequest,

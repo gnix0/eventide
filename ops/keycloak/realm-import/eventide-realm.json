@@ -1,7 +1,7 @@
 {
-  "realm": "event-pipeline",
+  "realm": "eventide",
   "enabled": true,
-  "displayName": "Event Pipeline",
+  "displayName": "Eventide",
   "roles": {
     "realm": [
       { "name": "platform-admin" },
@@ -15,8 +15,8 @@
   },
   "clients": [
     {
-      "clientId": "event-pipeline-api",
-      "name": "Event Pipeline API",
+      "clientId": "eventide-api",
+      "name": "Eventide API",
       "enabled": true,
       "publicClient": false,
       "serviceAccountsEnabled": true,
@@ -27,12 +27,12 @@
       "webOrigins": ["http://localhost:3000"],
       "protocolMappers": [
         {
-          "name": "audience-event-pipeline-api",
+          "name": "audience-eventide-api",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-audience-mapper",
           "consentRequired": false,
           "config": {
-            "included.client.audience": "event-pipeline-api",
+            "included.client.audience": "eventide-api",
             "id.token.claim": "true",
             "access.token.claim": "true"
           }
@@ -40,8 +40,8 @@
       ]
     },
     {
-      "clientId": "event-pipeline-cli",
-      "name": "Event Pipeline CLI",
+      "clientId": "eventide-cli",
+      "name": "Eventide CLI",
       "enabled": true,
       "publicClient": true,
       "protocol": "openid-connect",

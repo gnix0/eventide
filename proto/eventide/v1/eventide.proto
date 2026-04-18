@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package eventpipeline.v1;
+package eventide.v1;
 
 service PipelineService {
   rpc CreatePipeline(CreatePipelineRequest) returns (CreatePipelineResponse);

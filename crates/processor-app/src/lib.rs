@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
-use event_pipeline_types::{
+use eventide_types::{
     AggregateFunction, CheckpointSummary, DeadLetterRecord, DeploymentState, JoinKind,
     OperatorKind, PartitionAssignment, PipelineSpec, ReplayJob, SinkKind, WindowKind,
 };
@@ -610,7 +610,7 @@ impl ProcessorService {
         &self,
         state: &mut AssignmentState,
         operator_id: &str,
-        operator: &event_pipeline_types::OperatorNode,
+        operator: &eventide_types::OperatorNode,
         join_kind: JoinKind,
         key_field: &str,
         within_secs: u32,
@@ -894,7 +894,7 @@ fn validate_runtime_supported(pipeline: &PipelineSpec) -> Result<()> {
 }
 
 fn operator_active_upstream<'a>(
-    operator: &'a event_pipeline_types::OperatorNode,
+    operator: &'a eventide_types::OperatorNode,
     values: &'a BTreeMap<String, Vec<Value>>,
 ) -> Option<(&'a str, Vec<Value>)> {
     operator.upstream_ids.iter().find_map(|upstream_id| {
@@ -1037,7 +1037,7 @@ fn project_value(projection: &str, value: &Value) -> Result<Value> {
 }
 
 fn apply_window(
-    window_kind: &event_pipeline_types::WindowSpec,
+    window_kind: &eventide_types::WindowSpec,
     value: &Value,
     event_time_epoch_ms: u64,
 ) -> Result<Value> {
@@ -1128,7 +1128,7 @@ mod tests {
     };
     use anyhow::Result;
     use async_trait::async_trait;
-    use event_pipeline_types::{
+    use eventide_types::{
         AggregateFunction, CheckpointSummary, DeadLetterRecord, DeploymentConfig, DeploymentState,
         EventEncoding, JoinKind, OperatorKind, OperatorNode, PartitionAssignment, PipelineSpec,
         ReplayJob, ReplayJobStatus, ReplayPolicy, SinkKind, SinkSpec, SourceTopic, WindowKind,
