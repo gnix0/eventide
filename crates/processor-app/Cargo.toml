@@ -1,5 +1,5 @@
 [package]
-name = "event-pipeline-processor-app"
+name = "eventide-processor-app"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,7 +9,7 @@ version.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-event-pipeline-types = { path = "../types" }
+eventide-types = { path = "../types" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

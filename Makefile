@@ -1,6 +1,6 @@
 RUSTFLAGS ?=
 
-DATABASE_URL ?= postgres://postgres:postgres@127.0.0.1:5432/event_pipeline
+DATABASE_URL ?= postgres://postgres:postgres@127.0.0.1:5432/eventide
 
 .PHONY: fmt fmt-check lint test build check db-up db-down migrate control-plane
 

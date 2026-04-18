@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow, bail};
-use event_pipeline_types::{AuthenticatedPrincipal, SubjectKind};
+use eventide_types::{AuthenticatedPrincipal, SubjectKind};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::Deserialize;
 
@@ -97,7 +97,7 @@ struct RealmAccess {
 #[cfg(test)]
 mod tests {
     use super::{OidcSettings, OidcTokenValidator};
-    use event_pipeline_types::SubjectKind;
+    use eventide_types::SubjectKind;
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde::Serialize;
 
@@ -109,8 +109,8 @@ mod tests {
         let validator = validator();
         let token = token(TestClaims {
             sub: String::from("user-123"),
-            aud: vec![String::from("event-pipeline-api")],
-            iss: String::from("http://localhost:8081/realms/event-pipeline"),
+            aud: vec![String::from("eventide-api")],
+            iss: String::from("http://localhost:8081/realms/eventide"),
             exp: 4_102_444_800,
             preferred_username: Some(String::from("alice")),
             realm_access: TestRealmAccess {
@@ -132,8 +132,8 @@ mod tests {
         let validator = validator();
         let token = token(TestClaims {
             sub: String::from("service-account-subject"),
-            aud: vec![String::from("event-pipeline-api")],
-            iss: String::from("http://localhost:8081/realms/event-pipeline"),
+            aud: vec![String::from("eventide-api")],
+            iss: String::from("http://localhost:8081/realms/eventide"),
             exp: 4_102_444_800,
             preferred_username: Some(String::from("service-account-control-plane")),
             realm_access: TestRealmAccess { roles: Vec::new() },
@@ -151,7 +151,7 @@ mod tests {
         let validator = validator();
         let token = token(TestClaims {
             sub: String::from("user-123"),
-            aud: vec![String::from("event-pipeline-api")],
+            aud: vec![String::from("eventide-api")],
             iss: String::from("http://localhost:8081/realms/other"),
             exp: 4_102_444_800,
             preferred_username: Some(String::from("alice")),
@@ -167,8 +167,8 @@ mod tests {
 
     fn validator() -> OidcTokenValidator {
         OidcTokenValidator::new(OidcSettings {
-            issuer: String::from("http://localhost:8081/realms/event-pipeline"),
-            audience: String::from("event-pipeline-api"),
+            issuer: String::from("http://localhost:8081/realms/eventide"),
+            audience: String::from("eventide-api"),
             public_key_pem: String::from(PUBLIC_KEY),
         })
         .expect("validator should build")

@@ -1,9 +1,9 @@
 use anyhow::Result;
-use event_pipeline_config::ServiceRuntimeConfig;
-use event_pipeline_coordinator_app::{CoordinatorService, CoordinatorSettings};
-use event_pipeline_postgres_store::PostgresMetadataRepository;
-use event_pipeline_runtime::{init_tracing, wait_for_shutdown};
-use event_pipeline_types::{ExpireWorkerLeasesRequest, ListWorkersRequest, ServiceName};
+use eventide_config::ServiceRuntimeConfig;
+use eventide_coordinator_app::{CoordinatorService, CoordinatorSettings};
+use eventide_postgres_store::PostgresMetadataRepository;
+use eventide_runtime::{init_tracing, wait_for_shutdown};
+use eventide_types::{ExpireWorkerLeasesRequest, ListWorkersRequest, ServiceName};
 use std::sync::Arc;
 use tracing::info;
 

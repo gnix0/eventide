@@ -1,12 +1,10 @@
 use anyhow::Result;
-use event_pipeline_auth::{OidcSettings, OidcTokenValidator};
-use event_pipeline_config::ServiceRuntimeConfig;
-use event_pipeline_control_plane_app::{IdentityService, MetadataService};
-use event_pipeline_postgres_store::PostgresMetadataRepository;
-use event_pipeline_runtime::{init_tracing, wait_for_shutdown};
-use event_pipeline_types::{
-    ListPipelinesRequest, ListTenantsRequest, ListTopicsRequest, ServiceName,
-};
+use eventide_auth::{OidcSettings, OidcTokenValidator};
+use eventide_config::ServiceRuntimeConfig;
+use eventide_control_plane_app::{IdentityService, MetadataService};
+use eventide_postgres_store::PostgresMetadataRepository;
+use eventide_runtime::{init_tracing, wait_for_shutdown};
+use eventide_types::{ListPipelinesRequest, ListTenantsRequest, ListTopicsRequest, ServiceName};
 use std::sync::Arc;
 use tracing::info;
 

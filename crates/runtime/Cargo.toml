@@ -1,5 +1,5 @@
 [package]
-name = "event-pipeline-runtime"
+name = "eventide-runtime"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,7 +8,7 @@ version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-event-pipeline-config = { path = "../config" }
+eventide-config = { path = "../config" }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

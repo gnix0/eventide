@@ -1,7 +1,7 @@
 create table if not exists tenants (
   tenant_id text primary key,
   display_name text not null default '',
-  oidc_realm text not null default 'event-pipeline',
+  oidc_realm text not null default 'eventide',
   enabled boolean not null default true,
   created_at timestamptz not null default now()
 );
