@@ -2,8 +2,6 @@
 
 `eventide` is a Rust stream-processing control plane and processor runtime focused on pipeline metadata, worker coordination, stateful execution, replay, and runtime introspection.
 
-The project is intentionally application/runtime focused. It does not add Kubernetes, Terraform, or GitOps scaffolding by default; the value of the repository is in the processing semantics, state model, recovery paths, and queryable runtime internals.
-
 ## Architecture
 
 The workspace is organized as a set of service binaries and reusable domain crates:
@@ -12,7 +10,7 @@ The workspace is organized as a set of service binaries and reusable domain crat
 - `coordinator`: worker registration, heartbeats, partition assignment, rebalance, and stale-worker lease expiry
 - `processor-runtime`: assignment polling, source-event processing, operator execution, checkpointing, replay, and dead-letter handling
 - `query-service`: runtime read model for run status, assignments, checkpoints, replay jobs, and dead letters
-- `api-gateway`, `state-manager`, and `sink-writer`: service placeholders with shared runtime bootstrap
+- `api-gateway`, `state-manager`, and `sink-writer`: service entrypoints using the shared runtime bootstrap
 
 Core crates:
 
@@ -147,7 +145,7 @@ It defines:
 - `RunService`
 - `CoordinatorService`
 
-The Rust application layer currently uses domain structs directly. The protobuf file documents the external service contract shape for generated transports or future API wiring.
+The Rust application layer uses domain structs that mirror the protobuf contract boundaries.
 
 ## Persistence
 
@@ -288,18 +286,3 @@ cargo +stable test --workspace
 cargo +stable clippy --workspace --all-targets -- -D warnings
 cargo +stable build --workspace
 ```
-
-## Scope
-
-`eventide` is centered on stream-processing runtime internals:
-
-- pipeline metadata and validation
-- worker coordination
-- partition assignment
-- stateful operator execution
-- checkpoint and restore behavior
-- replay/backfill
-- dead-lettering
-- runtime introspection
-
-Deployment infrastructure is intentionally not part of the default scope for this repository.
